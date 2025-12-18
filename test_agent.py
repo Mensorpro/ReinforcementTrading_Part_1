@@ -8,79 +8,92 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 from indicators import load_and_preprocess_data
 from trading_env import ForexTradingEnv
 
-def main():
-    # 1. Load new test data
-    #    If you want to test on the EXACT training data, use the same CSV as training
-    #test_df = load_and_preprocess_data("data/EURUSD_Candlestick_1_Hour_BID_01.07.2020-15.07.2023.csv")
-    test_df = load_and_preprocess_data("data/test_EURUSD_Candlestick_1_Hour_BID_20.02.2023-22.02.2025.csv")
 
-    # 2. Create the same environment
-    #    Must match all parameters used in training: window_size, sl_options, tp_options
+def run_one_episode(model, vec_env, deterministic=True):
+    obs = vec_env.reset()
+    equity_curve = []
+    closed_trades = []
+
+    while True:
+        action, _ = model.predict(obs, deterministic=deterministic)
+        step_out = vec_env.step(action)
+
+        if len(step_out) == 4:
+            obs, rewards, dones, infos = step_out
+            done = bool(dones[0])
+        else:
+            obs, rewards, terminated, truncated, infos = step_out
+            done = bool(terminated[0] or truncated[0])
+
+        equity_curve.append(vec_env.get_attr("equity_usd")[0])
+
+        trade_info = vec_env.get_attr("last_trade_info")[0]
+        if isinstance(trade_info, dict) and trade_info.get("event") == "CLOSE":
+            closed_trades.append(trade_info)
+
+        if done:
+            break
+
+    return equity_curve, closed_trades
+
+
+def main():
+    # Choose the dataset you want to evaluate on
+    file_path = "data/EURUSD_15 Mins_Ask_2020.12.06_2025.12.12.csv"
+    df, feature_cols = load_and_preprocess_data(file_path)
+
+    # If you want a true OOS test here, split and use only the test slice:
+    split_idx = int(len(df) * 0.8)
+    test_df = df.iloc[split_idx:].copy()
+
+    # Must match training params
+    SL_OPTS = [10, 15, 25]
+    TP_OPTS = [10, 15, 25]
+    WIN = 30
+
     test_env = ForexTradingEnv(
         df=test_df,
-        window_size=30,         # same as training
-        sl_options=[30, 60, 80],  
-        tp_options=[30, 60, 80]
+            window_size=WIN,
+            sl_options=SL_OPTS,
+            tp_options=TP_OPTS,
+            spread_pips=1.0,
+            commission_pips=0.0,
+            max_slippage_pips=0.2,
+            random_start=False,
+            episode_max_steps=None,
+            feature_columns=feature_cols,
+            hold_reward_weight=0.005,
+            open_penalty_pips=0.5,      # half a pip per open
+            time_penalty_pips=0.02,     # 0.02 pips per bar in trade
+            unrealized_delta_weight=0.0
     )
 
-    # Wrap in DummyVecEnv just like training
     vec_test_env = DummyVecEnv([lambda: test_env])
 
-    # 3. Load the trained model
-    #    Must match the file name you saved in train_agent.py
-    model = PPO.load("model_eurusd", env=vec_test_env)
+    # Load best model
+    model = PPO.load("model_eurusd_best", env=vec_test_env)
 
-    # 4. Initialize logs
-    obs = vec_test_env.reset()
-    done = False
+    equity_curve, closed_trades = run_one_episode(model, vec_test_env, deterministic=True)
 
-    # For equity tracking
-    equity_curve = []
+    # Save trades
+    if closed_trades:
+        trades_df = pd.DataFrame(closed_trades)
+        out_csv = "trade_history_output.csv"
+        trades_df.to_csv(out_csv, index=False)
+        print(f"Closed trade history saved to {out_csv}")
+    else:
+        print("No closed trades recorded.")
 
-    # For trade tracking
-    trade_history = []
-    trade_id = 1  
-
-    # 5. Step through environment until done
-    while not done:
-        # Predict action (deterministic or stochastic: 'deterministic=True' for consistent test)
-        action, _states = model.predict(obs, deterministic=True)
-
-        # Take a step in the environment
-        obs, rewards, dones, info = vec_test_env.step(action)
-        done = dones[0]  
-
-        # Log the latest trade info from environment
-        trade_info = vec_test_env.get_attr("last_trade_info")[0]
-        if trade_info:
-            # If a trade was taken (direction != None in your env),
-            # trade_info['pnl'] = trade's profit/loss in pips (or 0 if no trade)
-            trade_history.append({
-                "Trade Number": trade_id,
-                "Entry Price": trade_info["entry_price"],
-                "Exit Price": trade_info["exit_price"],
-                "Profit/Loss": trade_info["pnl"]
-            })
-            trade_id += 1  
-
-        # Log equity
-        current_equity = vec_test_env.get_attr("equity")[0]
-        equity_curve.append(current_equity)
-
-    # 6. Convert trades to DataFrame and save
-    trades_df = pd.DataFrame(trade_history)
-    output_file = "trade_history_output.csv"
-    trades_df.to_csv(output_file, index=False)
-    print(f"Trade history saved to {output_file}")
-
-    # 7. Plot equity curve
+    # Plot equity
     plt.figure(figsize=(10, 6))
-    plt.plot(equity_curve, label='Equity (Test Data)')
-    plt.title("Equity Curve - Single-Bar RL Environment Test")
-    plt.xlabel("Time Steps")
-    plt.ylabel("Equity")
+    plt.plot(equity_curve, label="Equity (Test)")
+    plt.title("Equity Curve - Evaluation")
+    plt.xlabel("Steps")
+    plt.ylabel("Equity ($)")
     plt.legend()
+    plt.tight_layout()
     plt.show()
+
 
 if __name__ == "__main__":
     main()
