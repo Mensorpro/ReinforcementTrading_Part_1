@@ -265,10 +265,6 @@ def main():
     print("MODEL CONFIGURATION")
     print("=" * 60)
     
-    # Entropy decay schedule: Start high (explore), end low (exploit)
-    initial_ent_coef = 0.05   # High exploration early
-    final_ent_coef = 0.001    # Low exploration late (exploit good strategies)
-    
     # Clip range decay: Start high (big updates), end low (small updates)
     initial_clip_range = 0.2  # Standard PPO clip range
     final_clip_range = 0.05   # Conservative updates late in training
@@ -283,8 +279,8 @@ def main():
         gamma=0.99,                   # Keep same
         gae_lambda=0.95,              # Keep same
         clip_range=initial_clip_range,# Will decay during training
-        ent_coef=initial_ent_coef,    # Will decay during training
-        vf_coef=1.0,                  # Increased from 0.5 - value function more important
+        ent_coef=0.01,                # Moderate exploration - balanced
+        vf_coef=2.0,                  # Increased to prioritize value function learning
         max_grad_norm=0.5,            # Keep same
         policy_kwargs=dict(
             net_arch=dict(
@@ -301,7 +297,7 @@ def main():
     print(f"Value network    : {model.policy_kwargs['net_arch']['vf']}")
     print(f"N steps          : {model.n_steps}")
     print(f"Batch size       : {model.batch_size}")
-    print(f"Entropy coef     : {initial_ent_coef} -> {final_ent_coef} (decaying)")
+    print(f"Entropy coef     : {model.ent_coef} (constant - balanced exploration)")
     print(f"Clip range       : {initial_clip_range} -> {final_clip_range} (decaying)")
     print(f"Value coef       : {model.vf_coef}")
     print()
@@ -317,14 +313,7 @@ def main():
         name_prefix="ppo_eurusd"
     )
     
-    # Entropy decay: reduce exploration over time
     total_timesteps = 2_000_000
-    entropy_decay_callback = EntropyDecayCallback(
-        initial_ent_coef=initial_ent_coef,
-        final_ent_coef=final_ent_coef,
-        decay_steps=total_timesteps,  # Decay over entire training
-        verbose=1
-    )
     
     # Clip range decay: make policy updates more conservative over time
     clip_range_decay_callback = ClipRangeDecayCallback(
@@ -364,16 +353,17 @@ def main():
     print()
     print("KEY IMPROVEMENTS:")
     print("  • Ghost trades bug FIXED (last_trade_info cleared each step)")
-    print("  • Entropy decay: 0.05 -> 0.001 (explore early, exploit later)")
+    print("  • Entropy coef: 0.01 (constant - balanced exploration)")
     print("  • Clip range decay: 0.2 -> 0.05 (big updates -> small updates)")
-    print("  • Early stopping patience: 10 -> 30 (more time to converge)")
+    print("  • Value coef: 2.0 (prioritize value function learning)")
+    print("  • Early stopping patience: 30 (more time to converge)")
     print("  • Open penalty: 2.0 pips (discourage overtrading)")
     print("  • Time penalty: 0.05 pips/bar (avoid infinite holding)")
     print()
     
     model.learn(
         total_timesteps=total_timesteps, 
-        callback=[checkpoint_callback, entropy_decay_callback, clip_range_decay_callback, eval_callback]
+        callback=[checkpoint_callback, clip_range_decay_callback, eval_callback]
     )
 
     # ---- Select best model by validation performance ----
