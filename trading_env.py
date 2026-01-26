@@ -40,9 +40,7 @@ class ForexTradingEnv(gym.Env):
     def __init__(
         self,
         df,
-        window_size: int = 30,
-        sl_options=None,
-        tp_options=None,
+        window_size: int = 100,
         feature_columns = None,
         pip_value: float = 0.0001,
         spread_pips: float = 1.0,              # cost in pips per round-trip (approx)
@@ -60,6 +58,8 @@ class ForexTradingEnv(gym.Env):
         hold_reward_weight: float = 0.005,   # tuned below
         open_penalty_pips: float = 0.5,      # NEW: penalty per open
         time_penalty_pips: float = 0.02,     # NEW: cost per bar in a trade
+        atr_sl_multiplier: float = 1.5,      # SL = ATR × this multiplier
+        atr_tp_multiplier: float = 3.0,      # TP = ATR × this multiplier (2:1 risk-reward)
     ):
         super().__init__()
 
@@ -71,16 +71,19 @@ class ForexTradingEnv(gym.Env):
         else:
             self.feature_columns = list(feature_columns)
 
-        if sl_options is None or tp_options is None:
-            raise ValueError("sl_options and tp_options must be provided (e.g. [15,20,30]).")
-        self.sl_options = list(sl_options)
-        self.tp_options = list(tp_options)
+        # Ensure ATR is in the dataframe for dynamic SL/TP
+        if 'atr_14' not in self.df.columns:
+            raise ValueError("DataFrame must contain 'atr_14' column for ATR-based SL/TP")
 
         if self.n_steps <= window_size + 2:
             raise ValueError("Dataframe is too short for the given window_size.")
 
         self.window_size = int(window_size)
         self.pip_value = float(pip_value)
+
+        # ATR-based SL/TP multipliers
+        self.atr_sl_multiplier = float(atr_sl_multiplier)
+        self.atr_tp_multiplier = float(atr_tp_multiplier)
 
         # Friction
         self.spread_pips = float(spread_pips)
@@ -112,15 +115,17 @@ class ForexTradingEnv(gym.Env):
 
         self.allow_flip = bool(allow_flip)
 
-        # --- Actions ---
+        # --- Actions (Simplified to 4 actions) ---
         # 0: HOLD
         # 1: CLOSE
-        # 2..: OPEN(direction, sl, tp)
-        self.action_map = [("HOLD", None, None, None), ("CLOSE", None, None, None)]
-        for direction in [0, 1]:  # 0=short, 1=long
-            for sl in self.sl_options:
-                for tp in self.tp_options:
-                    self.action_map.append(("OPEN", direction, float(sl), float(tp)))
+        # 2: LONG (SL/TP calculated dynamically from ATR)
+        # 3: SHORT (SL/TP calculated dynamically from ATR)
+        self.action_map = [
+            ("HOLD", None),
+            ("CLOSE", None),
+            ("LONG", 1),   # direction: 1 = long
+            ("SHORT", -1)  # direction: -1 = short
+        ]
 
         self.action_space = spaces.Discrete(len(self.action_map))
 
@@ -156,6 +161,8 @@ class ForexTradingEnv(gym.Env):
         self.tp_price = None
         self.time_in_trade = 0
         self.prev_unrealized_pips = 0.0
+        self.max_unrealized_pips = 0.0  # Track peak unrealized profit for drawdown penalty
+        self.sl_pips = 0.0  # Store SL distance for risk-adjusted returns
 
         # Accounting
         self.initial_equity_usd = 10000.0
@@ -229,7 +236,14 @@ class ForexTradingEnv(gym.Env):
         # Simple friction model (round-trip)
         return self.spread_pips + self.commission_pips
 
-    def _open_position(self, direction: int, sl_pips: float, tp_pips: float):
+    def _open_position(self, direction: int):
+        # Get current ATR for dynamic SL/TP calculation
+        current_atr = float(self.df.loc[self.current_step, "atr_14"])
+        
+        # Calculate SL and TP in pips based on ATR
+        sl_pips = (current_atr / self.pip_value) * self.atr_sl_multiplier
+        tp_pips = (current_atr / self.pip_value) * self.atr_tp_multiplier
+        
         # Entry on current close + slippage; costs applied on close (round-trip model)
         close_price = float(self.df.loc[self.current_step, "Close"])
         slip_pips = self._sample_slippage_pips()
@@ -251,6 +265,8 @@ class ForexTradingEnv(gym.Env):
         self.tp_price = tp_price
         self.time_in_trade = 0
         self.prev_unrealized_pips = 0.0
+        self.max_unrealized_pips = 0.0  # Reset for new trade
+        self.sl_pips = sl_pips  # Store for risk-adjusted calculations
 
         self.last_trade_info = {
             "event": "OPEN",
@@ -258,7 +274,10 @@ class ForexTradingEnv(gym.Env):
             "position": self.position,
             "entry_price": self.entry_price,
             "sl_price": self.sl_price,
-            "tp_price": self.tp_price
+            "tp_price": self.tp_price,
+            "atr": current_atr,
+            "sl_pips": float(sl_pips),
+            "tp_pips": float(tp_pips)
         }
 
     def _close_position(self, reason: str, exit_price: float):
@@ -297,13 +316,15 @@ class ForexTradingEnv(gym.Env):
         self.tp_price = None
         self.time_in_trade = 0
         self.prev_unrealized_pips = 0.0
+        self.max_unrealized_pips = 0.0
+        self.sl_pips = 0.0
 
         self.last_trade_info = trade_info
         return net_pips
 
     def _check_sl_tp_intrabar_and_maybe_close(self) -> float:
         """
-        Checks SL/TP on the *next bar* range [Low, High].
+        Checks SL/TP on the *current bar* range [Low, High].
         Conservative rule if both touched: assume SL hits first (worst case).
         Returns realized net pips if closed; otherwise None.
         """
@@ -311,17 +332,18 @@ class ForexTradingEnv(gym.Env):
             return None
 
         # If last bar, close on close
-        if self.current_step >= self.n_steps - 2:
+        if self.current_step >= self.n_steps - 1:
             exit_price = float(self.df.loc[self.current_step, "Close"])
             net_pips = self._close_position("END_OF_DATA", exit_price)
             return net_pips
 
-        next_high = float(self.df.loc[self.current_step + 1, "High"])
-        next_low = float(self.df.loc[self.current_step + 1, "Low"])
+        # Check CURRENT bar's High/Low (not next bar!)
+        current_high = float(self.df.loc[self.current_step, "High"])
+        current_low = float(self.df.loc[self.current_step, "Low"])
 
         if self.position == 1:
-            sl_hit = next_low <= self.sl_price
-            tp_hit = next_high >= self.tp_price
+            sl_hit = current_low <= self.sl_price
+            tp_hit = current_high >= self.tp_price
             if sl_hit and tp_hit:
                 # conservative: SL first
                 return self._close_position("SL_AND_TP_SAME_BAR_SL_FIRST", self.sl_price)
@@ -330,8 +352,8 @@ class ForexTradingEnv(gym.Env):
             elif tp_hit:
                 return self._close_position("TP_HIT", self.tp_price)
         else:
-            sl_hit = next_high >= self.sl_price
-            tp_hit = next_low <= self.tp_price
+            sl_hit = current_high >= self.sl_price
+            tp_hit = current_low <= self.tp_price
             if sl_hit and tp_hit:
                 return self._close_position("SL_AND_TP_SAME_BAR_SL_FIRST", self.sl_price)
             elif sl_hit:
@@ -380,11 +402,14 @@ class ForexTradingEnv(gym.Env):
 
         self.steps_in_episode += 1
 
+        # Clear last trade info at start of step (prevents ghost trades)
+        self.last_trade_info = None
+
         # Reward components
         reward_pips = 0.0
         info = {}
 
-        act_type, direction, sl_pips, tp_pips = self.action_map[int(action)]
+        act_type, direction = self.action_map[int(action)]
 
         # 1) Apply action logic
         if act_type == "HOLD":
@@ -399,50 +424,51 @@ class ForexTradingEnv(gym.Env):
                 exit_price = close_price - slip_price if self.position == 1 else close_price + slip_price
                 reward_pips += self._close_position("MANUAL_CLOSE", exit_price)
 
-        elif act_type == "OPEN":
+        elif act_type in ["LONG", "SHORT"]:
             if self.position == 0:
-                self._open_position(direction=direction, sl_pips=sl_pips, tp_pips=tp_pips)
+                self._open_position(direction=direction)
                 # penalty for opening a trade to discourage overtrading
                 reward_pips -= self.open_penalty_pips
             else:
                 if self.allow_flip:
                     close_price = float(self.df.loc[self.current_step, "Close"])
                     reward_pips += self._close_position("FLIP_CLOSE", close_price)
-                    self._open_position(direction=direction, sl_pips=sl_pips, tp_pips=tp_pips)
+                    self._open_position(direction=direction)
                     reward_pips -= self.open_penalty_pips
 
+        # 2) Advance time FIRST
+        self.current_step += 1
 
-        # 2) If position is open, check SL/TP on next bar intrabar
+        # 3) THEN check SL/TP on the new current bar (no future data!)
         realized_now = self._check_sl_tp_intrabar_and_maybe_close()
         if realized_now is not None:
+            # Just add the realized pips (already includes costs)
             reward_pips += realized_now
 
-        # 3) If still open, apply reward shaping based on delta-unrealized pips
-        # 3) If still open, apply reward shaping
+        # 4) If still open, apply reward shaping
         if self.position != 0:
             self.time_in_trade += 1
 
             unreal_now = self._compute_unrealized_pips()
             delta_unreal = unreal_now - self.prev_unrealized_pips
+            
+            # Track maximum unrealized profit for drawdown penalty
+            if unreal_now > self.max_unrealized_pips:
+                self.max_unrealized_pips = unreal_now
 
-            # (a) small bonus for holding a winning trade
-            #     proportional to current unrealized profit
-            if unreal_now > 0:
-                reward_pips += self.hold_reward_weight * unreal_now
+            # === DRAWDOWN PENALTY ===
+            # Penalize letting significant profits slip away
+            if self.max_unrealized_pips > 10:
+                profit_retention = unreal_now / self.max_unrealized_pips
+                if profit_retention < 0.5:  # Lost more than 50% of peak profit
+                    drawdown_penalty = (0.5 - profit_retention) * 5.0
+                    reward_pips -= drawdown_penalty
 
-            # (b) optional shaping on change in unrealized (can keep small or zero)
-            if self.unrealized_delta_weight != 0.0:
-                reward_pips += self.unrealized_delta_weight * delta_unreal
-
-            # (c) small time cost per bar in a trade to avoid infinite holding
+            # === TIME PENALTY ===
+            # Small cost per bar in a trade to avoid infinite holding
             reward_pips -= self.time_penalty_pips
 
             self.prev_unrealized_pips = unreal_now
-
-
-
-        # 4) Advance time
-        self.current_step += 1
 
         # 5) Termination / truncation
         if self.current_step >= self.n_steps - 1:

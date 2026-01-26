@@ -4,18 +4,119 @@ import matplotlib.pyplot as plt
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
-from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
+from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback, StopTrainingOnNoModelImprovement, BaseCallback
 
 from indicators import load_and_preprocess_data
 from trading_env import ForexTradingEnv
 
 
+class EntropyDecayCallback(BaseCallback):
+    """
+    Callback to gradually reduce entropy coefficient during training.
+    This makes the model explore early, then exploit once it finds good strategies.
+    
+    Args:
+        initial_ent_coef: Starting entropy coefficient (high exploration)
+        final_ent_coef: Ending entropy coefficient (low exploration)
+        decay_steps: Number of timesteps over which to decay
+        verbose: Verbosity level
+    """
+    def __init__(self, initial_ent_coef: float, final_ent_coef: float, decay_steps: int, verbose: int = 0):
+        super().__init__(verbose)
+        self.initial_ent_coef = initial_ent_coef
+        self.final_ent_coef = final_ent_coef
+        self.decay_steps = decay_steps
+        
+    def _on_step(self) -> bool:
+        # Calculate current entropy coefficient based on progress
+        progress = min(self.num_timesteps / self.decay_steps, 1.0)
+        
+        # Linear decay from initial to final
+        current_ent_coef = self.initial_ent_coef - (self.initial_ent_coef - self.final_ent_coef) * progress
+        
+        # Update model's entropy coefficient
+        self.model.ent_coef = current_ent_coef
+        
+        # Log every 50k steps
+        if self.num_timesteps % 50000 == 0:
+            if self.verbose > 0:
+                print(f"\n[Entropy Decay] Step {self.num_timesteps:,}: ent_coef = {current_ent_coef:.4f} (progress: {progress*100:.1f}%)")
+        
+        return True
+
+
+class ClipRangeDecayCallback(BaseCallback):
+    """
+    Callback to gradually reduce clip range during training.
+    This makes policy updates more conservative as training progresses.
+    
+    Args:
+        initial_clip_range: Starting clip range (larger updates)
+        final_clip_range: Ending clip range (smaller updates)
+        decay_steps: Number of timesteps over which to decay
+        verbose: Verbosity level
+    """
+    def __init__(self, initial_clip_range: float, final_clip_range: float, decay_steps: int, verbose: int = 0):
+        super().__init__(verbose)
+        self.initial_clip_range = initial_clip_range
+        self.final_clip_range = final_clip_range
+        self.decay_steps = decay_steps
+        
+    def _on_step(self) -> bool:
+        # Calculate current clip range based on progress
+        progress = min(self.num_timesteps / self.decay_steps, 1.0)
+        
+        # Linear decay from initial to final
+        current_clip_range = self.initial_clip_range - (self.initial_clip_range - self.final_clip_range) * progress
+        
+        # Update model's clip range (need to create a lambda that returns the value)
+        self.model.clip_range = lambda _: current_clip_range
+        
+        # Log every 50k steps
+        if self.num_timesteps % 50000 == 0:
+            if self.verbose > 0:
+                print(f"[Clip Range Decay] Step {self.num_timesteps:,}: clip_range = {current_clip_range:.4f}")
+        
+        return True
+
+
+def calculate_metrics(equity_curve):
+    """Calculate trading performance metrics"""
+    equity_array = np.array(equity_curve)
+    returns = np.diff(equity_array) / equity_array[:-1]
+    
+    # Sharpe Ratio (annualized, assuming hourly data)
+    if len(returns) > 0 and np.std(returns) > 0:
+        sharpe = np.mean(returns) / np.std(returns) * np.sqrt(252 * 24)  # Annualized
+    else:
+        sharpe = 0.0
+    
+    # Max Drawdown
+    cummax = np.maximum.accumulate(equity_array)
+    drawdown = (equity_array - cummax) / cummax
+    max_drawdown = np.min(drawdown) * 100  # As percentage
+    
+    # Total Return
+    total_return = ((equity_array[-1] - equity_array[0]) / equity_array[0]) * 100
+    
+    return {
+        "sharpe_ratio": float(sharpe),
+        "max_drawdown_pct": float(max_drawdown),
+        "total_return_pct": float(total_return),
+        "final_equity": float(equity_array[-1])
+    }
+
+
 def evaluate_model(model: PPO, eval_env: DummyVecEnv, deterministic: bool = True):
     obs = eval_env.reset()
     equity_curve = []
+    trades = []
+    action_counts = {0: 0, 1: 0, 2: 0, 3: 0}  # Track action distribution
 
     while True:
         action, _ = model.predict(obs, deterministic=deterministic)
+        action_counts[int(action[0])] += 1  # Count this action
+        
         step_out = eval_env.step(action)
 
         if len(step_out) == 4:
@@ -29,12 +130,36 @@ def evaluate_model(model: PPO, eval_env: DummyVecEnv, deterministic: bool = True
         # use equity from info (state *before* DummyVecEnv reset)
         eq = info.get("equity_usd", eval_env.get_attr("equity_usd")[0])
         equity_curve.append(eq)
+        
+        # Track closed trades
+        trade_info = info.get("last_trade_info")
+        if trade_info and trade_info.get("event") == "CLOSE":
+            trades.append(trade_info)
 
         if done:
             break
 
-    final_equity = float(equity_curve[-1])
-    return equity_curve, final_equity
+    metrics = calculate_metrics(equity_curve)
+    
+    # Calculate win rate from trades
+    if trades:
+        winning_trades = sum(1 for t in trades if t.get("net_pips", 0) > 0)
+        metrics["win_rate"] = (winning_trades / len(trades)) * 100
+        metrics["num_trades"] = len(trades)
+    else:
+        metrics["win_rate"] = 0.0
+        metrics["num_trades"] = 0
+    
+    # Add action distribution
+    total_actions = sum(action_counts.values())
+    metrics["action_distribution"] = {
+        "HOLD": (action_counts[0] / total_actions * 100) if total_actions > 0 else 0,
+        "CLOSE": (action_counts[1] / total_actions * 100) if total_actions > 0 else 0,
+        "LONG": (action_counts[2] / total_actions * 100) if total_actions > 0 else 0,
+        "SHORT": (action_counts[3] / total_actions * 100) if total_actions > 0 else 0,
+    }
+    
+    return equity_curve, metrics
 
 
 
@@ -42,17 +167,23 @@ def main():
     file_path = "data/EURUSD_Candlestick_1_Hour_BID_01.07.2020-15.07.2023.csv"
     df, feature_cols = load_and_preprocess_data(file_path)
 
-    # Time split 80/20
-    split_idx = int(len(df) * 0.8)
-    train_df = df.iloc[:split_idx].copy()
-    test_df = df.iloc[split_idx:].copy()
+    # Time split: 70% train, 15% validation, 15% test
+    train_idx = int(len(df) * 0.7)
+    val_idx = int(len(df) * 0.85)
+    
+    train_df = df.iloc[:train_idx].copy()
+    val_df = df.iloc[train_idx:val_idx].copy()
+    test_df = df.iloc[val_idx:].copy()
 
-    print("Training bars:", len(train_df))
-    print("Testing bars :", len(test_df))
+    print("=" * 60)
+    print("DATA SPLIT")
+    print("=" * 60)
+    print(f"Training bars  : {len(train_df):,}")
+    print(f"Validation bars: {len(val_df):,}")
+    print(f"Testing bars   : {len(test_df):,}")
+    print()
 
     # ---- Env factories ----
-    SL_OPTS = [5, 10, 15, 25, 30, 60, 90, 120]
-    TP_OPTS = [5, 10, 15, 25, 30, 60, 90, 120]
     WIN = 30
 
     # Train env: random starts to reduce memorization
@@ -60,8 +191,6 @@ def main():
         return ForexTradingEnv(
             df=train_df,
             window_size=WIN,
-            sl_options=SL_OPTS,
-            tp_options=TP_OPTS,
             spread_pips=1.0,
             commission_pips=0.0,
             max_slippage_pips=0.2,
@@ -69,10 +198,10 @@ def main():
             min_episode_steps=1000,
             episode_max_steps=2000,
             feature_columns=feature_cols,
-            hold_reward_weight=0.0,#0.05
-            open_penalty_pips=0.0,      # 0.5 half a pip per open
-            time_penalty_pips=0.0,     # 0.02 pips per bar in trade
-            unrealized_delta_weight=0.0
+            open_penalty_pips=2.0,          # Stop overtrading
+            time_penalty_pips=0.05,         # Cost per bar in trade
+            atr_sl_multiplier=1.5,
+            atr_tp_multiplier=3.0
         )
 
     # Train-eval env: deterministic start, NO random starts (so curve is stable/reproducible)
@@ -80,18 +209,16 @@ def main():
         return ForexTradingEnv(
             df=train_df,
             window_size=WIN,
-            sl_options=SL_OPTS,
-            tp_options=TP_OPTS,
             spread_pips=1.0,
             commission_pips=0.0,
             max_slippage_pips=0.2,
             random_start=False,
             episode_max_steps=None,
             feature_columns=feature_cols,
-            hold_reward_weight=0.00,
-            open_penalty_pips=0.0,      # half a pip per open
-            time_penalty_pips=0.0,     # 0.02 pips per bar in trade
-            unrealized_delta_weight=0.0
+            open_penalty_pips=2.0,
+            time_penalty_pips=0.05,
+            atr_sl_multiplier=1.5,
+            atr_tp_multiplier=3.0
         )
 
     # Test-eval env: deterministic
@@ -99,96 +226,246 @@ def main():
         return ForexTradingEnv(
             df=test_df,
             window_size=WIN,
-            sl_options=SL_OPTS,
-            tp_options=TP_OPTS,
             spread_pips=1.0,
             commission_pips=0.0,
             max_slippage_pips=0.2,
             random_start=False,
             episode_max_steps=None,
             feature_columns=feature_cols,
-            hold_reward_weight=0.00,
-            open_penalty_pips=0.0,      # half a pip per open
-            time_penalty_pips=0.00,     # 0.02 pips per bar in trade
-            unrealized_delta_weight=0.0
+            open_penalty_pips=2.0,
+            time_penalty_pips=0.05,
+            atr_sl_multiplier=1.5,
+            atr_tp_multiplier=3.0
+        )
+    
+    # Validation env: for early stopping
+    def make_val_env():
+        return ForexTradingEnv(
+            df=val_df,
+            window_size=WIN,
+            spread_pips=1.0,
+            commission_pips=0.0,
+            max_slippage_pips=0.2,
+            random_start=False,
+            episode_max_steps=None,
+            feature_columns=feature_cols,
+            open_penalty_pips=2.0,
+            time_penalty_pips=0.05,
+            atr_sl_multiplier=1.5,
+            atr_tp_multiplier=3.0
         )
 
     train_vec_env = DummyVecEnv([make_train_env])
     train_eval_env = DummyVecEnv([make_train_eval_env])
+    val_eval_env = DummyVecEnv([make_val_env])
     test_eval_env = DummyVecEnv([make_test_eval_env])
 
-    # ---- Model ----
+    # ---- Model with Tuned Hyperparameters ----
+    print("=" * 60)
+    print("MODEL CONFIGURATION")
+    print("=" * 60)
+    
+    # Entropy decay schedule: Start high (explore), end low (exploit)
+    initial_ent_coef = 0.05   # High exploration early
+    final_ent_coef = 0.001    # Low exploration late (exploit good strategies)
+    
+    # Clip range decay: Start high (big updates), end low (small updates)
+    initial_clip_range = 0.2  # Standard PPO clip range
+    final_clip_range = 0.05   # Conservative updates late in training
+    
     model = PPO(
         policy="MlpPolicy",
         env=train_vec_env,
+        learning_rate=1e-4,           # Reduced from 3e-4 for stability
+        n_steps=4096,                 # Increased from 2048 for better value estimates
+        batch_size=64,                # Keep same
+        n_epochs=10,                  # Keep same
+        gamma=0.99,                   # Keep same
+        gae_lambda=0.95,              # Keep same
+        clip_range=initial_clip_range,# Will decay during training
+        ent_coef=initial_ent_coef,    # Will decay during training
+        vf_coef=1.0,                  # Increased from 0.5 - value function more important
+        max_grad_norm=0.5,            # Keep same
+        policy_kwargs=dict(
+            net_arch=dict(
+                pi=[256, 256, 128],      # Policy network: 3 layers
+                vf=[512, 512, 256, 128]  # Value network: 4 layers, BIGGER!
+            )
+        ),
         verbose=1,
         tensorboard_log="./tensorboard_log/"
     )
+    
+    print(f"Learning rate    : {model.learning_rate}")
+    print(f"Policy network   : {model.policy_kwargs['net_arch']['pi']}")
+    print(f"Value network    : {model.policy_kwargs['net_arch']['vf']}")
+    print(f"N steps          : {model.n_steps}")
+    print(f"Batch size       : {model.batch_size}")
+    print(f"Entropy coef     : {initial_ent_coef} -> {final_ent_coef} (decaying)")
+    print(f"Clip range       : {initial_clip_range} -> {final_clip_range} (decaying)")
+    print(f"Value coef       : {model.vf_coef}")
+    print()
 
-    # ---- Checkpoints ----
+    # ---- Callbacks ----
     ckpt_dir = "./checkpoints"
     os.makedirs(ckpt_dir, exist_ok=True)
 
+    # Checkpoint every 50k steps
     checkpoint_callback = CheckpointCallback(
         save_freq=50_000,
         save_path=ckpt_dir,
         name_prefix="ppo_eurusd"
     )
-
-    # ---- Train ----
-    total_timesteps = 600000
-    model.learn(total_timesteps=total_timesteps, callback=checkpoint_callback)
-
-    # ---- Select best model by OOS final equity ----
-    equity_curve_test_last, final_equity_test_last = evaluate_model(model, test_eval_env)
-    print(f"[OOS Eval] Last model final equity: {final_equity_test_last:.2f}")
-
-    best_equity = -np.inf
-    best_path = None
-
-    ckpts = sorted(
-        [f for f in os.listdir(ckpt_dir) if f.endswith(".zip") and f.startswith("ppo_eurusd")],
-        key=lambda x: os.path.getmtime(os.path.join(ckpt_dir, x))
+    
+    # Entropy decay: reduce exploration over time
+    total_timesteps = 2_000_000
+    entropy_decay_callback = EntropyDecayCallback(
+        initial_ent_coef=initial_ent_coef,
+        final_ent_coef=final_ent_coef,
+        decay_steps=total_timesteps,  # Decay over entire training
+        verbose=1
+    )
+    
+    # Clip range decay: make policy updates more conservative over time
+    clip_range_decay_callback = ClipRangeDecayCallback(
+        initial_clip_range=initial_clip_range,
+        final_clip_range=final_clip_range,
+        decay_steps=total_timesteps,  # Decay over entire training
+        verbose=1
+    )
+    
+    # Early stopping based on validation performance
+    stop_callback = StopTrainingOnNoModelImprovement(
+        max_no_improvement_evals=30,  # Increased patience
+        min_evals=15,
+        verbose=1
+    )
+    
+    # Evaluate on validation set every 25k steps
+    eval_callback = EvalCallback(
+        val_eval_env,
+        callback_after_eval=stop_callback,
+        eval_freq=25_000,
+        n_eval_episodes=1,
+        best_model_save_path="./best_model/",
+        log_path="./logs/",
+        deterministic=True,
+        verbose=1
     )
 
-    for ck in ckpts:
-        ck_path = os.path.join(ckpt_dir, ck)
-        try:
-            m = PPO.load(ck_path, env=test_eval_env)
-            _, final_eq = evaluate_model(m, test_eval_env)
-            print(f"[OOS Eval] {ck} -> final equity: {final_eq:.2f}")
-            if final_eq > best_equity:
-                best_equity = final_eq
-                best_path = ck_path
-        except Exception as e:
-            print(f"[Skip] Could not evaluate checkpoint {ck}: {e}")
+    # ---- Train ----
+    print("=" * 60)
+    print("TRAINING")
+    print("=" * 60)
+    print(f"Total timesteps  : {total_timesteps:,}")
+    print(f"Checkpoint freq  : 50,000 steps")
+    print(f"Eval freq        : 25,000 steps")
+    print(f"Early stopping   : Enabled (patience=30)")
+    print()
+    print("KEY IMPROVEMENTS:")
+    print("  • Ghost trades bug FIXED (last_trade_info cleared each step)")
+    print("  • Entropy decay: 0.05 -> 0.001 (explore early, exploit later)")
+    print("  • Clip range decay: 0.2 -> 0.05 (big updates -> small updates)")
+    print("  • Early stopping patience: 10 -> 30 (more time to converge)")
+    print("  • Open penalty: 2.0 pips (discourage overtrading)")
+    print("  • Time penalty: 0.05 pips/bar (avoid infinite holding)")
+    print()
+    
+    model.learn(
+        total_timesteps=total_timesteps, 
+        callback=[checkpoint_callback, entropy_decay_callback, clip_range_decay_callback, eval_callback]
+    )
 
-    # Decide best model
-    if best_path is None or final_equity_test_last >= best_equity:
-        print("Using last model as best (by OOS final equity).")
-        best_model = model
+    # ---- Select best model by validation performance ----
+    print("\n" + "=" * 60)
+    print("MODEL SELECTION")
+    print("=" * 60)
+    
+    # Load best model from validation (saved by EvalCallback)
+    best_model_path = "./best_model/best_model.zip"
+    if os.path.exists(best_model_path):
+        print("Loading best model from validation...")
+        best_model = PPO.load(best_model_path, env=train_vec_env)
     else:
-        print(f"Using best checkpoint: {best_path} (OOS final equity: {best_equity:.2f})")
-        best_model = PPO.load(best_path, env=train_vec_env)
-
+        print("No best model found, using final model...")
+        best_model = model
+    
+    # Evaluate on all three sets
+    print("\nEvaluating best model on all datasets...")
+    
+    equity_curve_train, metrics_train = evaluate_model(best_model, train_eval_env)
+    equity_curve_val, metrics_val = evaluate_model(best_model, val_eval_env)
+    equity_curve_test, metrics_test = evaluate_model(best_model, test_eval_env)
+    
+    # Print results
+    print("\n" + "=" * 60)
+    print("PERFORMANCE METRICS")
+    print("=" * 60)
+    
+    def print_metrics(name, metrics):
+        print(f"\n{name}:")
+        print(f"  Final Equity    : ${metrics['final_equity']:,.2f}")
+        print(f"  Total Return    : {metrics['total_return_pct']:+.2f}%")
+        print(f"  Sharpe Ratio    : {metrics['sharpe_ratio']:.3f}")
+        print(f"  Max Drawdown    : {metrics['max_drawdown_pct']:.2f}%")
+        print(f"  Win Rate        : {metrics['win_rate']:.1f}%")
+        print(f"  Number of Trades: {metrics['num_trades']}")
+        
+        # Print action distribution
+        action_dist = metrics.get('action_distribution', {})
+        if action_dist:
+            print(f"  Action Distribution:")
+            print(f"    HOLD : {action_dist['HOLD']:5.1f}%")
+            print(f"    CLOSE: {action_dist['CLOSE']:5.1f}%")
+            print(f"    LONG : {action_dist['LONG']:5.1f}%")
+            print(f"    SHORT: {action_dist['SHORT']:5.1f}%")
+    
+    print_metrics("TRAIN SET", metrics_train)
+    print_metrics("VALIDATION SET", metrics_val)
+    print_metrics("TEST SET (Out-of-Sample)", metrics_test)
+    
+    # Save best model
     best_model.save("model_eurusd_best")
-    print("Best model saved: model_eurusd_best")
+    print(f"\n✓ Best model saved: model_eurusd_best.zip")
 
-    # ---- Plot BOTH: in-sample vs out-of-sample ----
-    equity_curve_train, final_equity_train = evaluate_model(best_model, train_eval_env)
-    equity_curve_test, final_equity_test = evaluate_model(best_model, test_eval_env)
-
-    print(f"[IS Eval]  Final equity (train): {final_equity_train:.2f}")
-    print(f"[OOS Eval] Final equity (test) : {final_equity_test:.2f}")
-
-    plt.figure(figsize=(12, 6))
-    plt.plot(equity_curve_train, label="Train (in-sample) equity")
-    plt.plot(equity_curve_test, label="Test (out-of-sample) equity")
-    plt.title("Equity Curves: In-sample vs Out-of-sample (Best Model)")
+    # ---- Plot Results ----
+    print("\n" + "=" * 60)
+    print("GENERATING PLOTS")
+    print("=" * 60)
+    
+    plt.figure(figsize=(14, 8))
+    
+    # Plot 1: Equity Curves
+    plt.subplot(2, 1, 1)
+    plt.plot(equity_curve_train, label=f"Train (Return: {metrics_train['total_return_pct']:+.1f}%)", alpha=0.8)
+    plt.plot(equity_curve_val, label=f"Validation (Return: {metrics_val['total_return_pct']:+.1f}%)", alpha=0.8)
+    plt.plot(equity_curve_test, label=f"Test (Return: {metrics_test['total_return_pct']:+.1f}%)", alpha=0.8)
+    plt.axhline(y=10000, color='gray', linestyle='--', alpha=0.5, label='Initial Equity')
+    plt.title("Equity Curves: Train / Validation / Test", fontsize=14, fontweight='bold')
     plt.xlabel("Steps")
     plt.ylabel("Equity ($)")
     plt.legend()
+    plt.grid(alpha=0.3)
+    
+    # Plot 2: Returns Distribution
+    plt.subplot(2, 1, 2)
+    returns_train = np.diff(equity_curve_train) / np.array(equity_curve_train[:-1]) * 100
+    returns_val = np.diff(equity_curve_val) / np.array(equity_curve_val[:-1]) * 100
+    returns_test = np.diff(equity_curve_test) / np.array(equity_curve_test[:-1]) * 100
+    
+    plt.hist(returns_train, bins=50, alpha=0.5, label='Train', density=True)
+    plt.hist(returns_val, bins=50, alpha=0.5, label='Validation', density=True)
+    plt.hist(returns_test, bins=50, alpha=0.5, label='Test', density=True)
+    plt.axvline(x=0, color='red', linestyle='--', alpha=0.5)
+    plt.title("Returns Distribution", fontsize=14, fontweight='bold')
+    plt.xlabel("Return (%)")
+    plt.ylabel("Density")
+    plt.legend()
+    plt.grid(alpha=0.3)
+    
     plt.tight_layout()
+    plt.savefig("training_results.png", dpi=150)
+    print("✓ Plot saved: training_results.png")
     plt.show()
 
 
