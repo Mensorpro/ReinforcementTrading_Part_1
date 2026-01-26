@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Model files
+*.zip
+*.h5
+*.pkl
+*.pth
+*.pt
+best_model/
+model_*.zip
+
+# Training artifacts
+checkpoints/
+logs/
+tensorboard_log/
+*.png
+*.jpg
+*.jpeg
+
+# Data files (optional - uncomment if you don't want to track data)
+# data/
+# *.csv
+
+# Live testing results
+live_testing/*.png
+live_testing/*.txt
+live_testing/live_eurusd_data.csv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*.tmp
+*.bak
+*.log
