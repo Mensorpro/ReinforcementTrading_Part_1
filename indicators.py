@@ -10,17 +10,24 @@ def load_and_preprocess_data(csv_path: str):
     The returned DataFrame still contains OHLCV for env internals,
     but `feature_cols` lists only the RELATIVE columns to feed the agent.
     """
-    df = pd.read_csv(
-        csv_path,
-        parse_dates=["Time (EET)"],
-        dayfirst=True,
-    )
-
+    df = pd.read_csv(csv_path)
+    
     # Strip any trailing spaces in headers (e.g. 'Volume ')
     df.columns = df.columns.str.strip()
-
-    # Datetime index
-    df = df.set_index("Time (EET)")
+    
+    # Detect the time column (could be "Gmt time", "Time (EET)", etc.)
+    time_col = None
+    for col in df.columns:
+        if 'time' in col.lower() or 'date' in col.lower():
+            time_col = col
+            break
+    
+    if time_col is None:
+        raise ValueError(f"No time/date column found in CSV. Columns: {df.columns.tolist()}")
+    
+    # Parse datetime and set as index
+    df[time_col] = pd.to_datetime(df[time_col], dayfirst=True)
+    df = df.set_index(time_col)
     df.sort_index(inplace=True)
 
     # Ensure numeric

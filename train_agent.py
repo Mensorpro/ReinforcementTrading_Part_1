@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
-from stable_baselines3.common.callbacks import CheckpointCallback
+from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
 
 from indicators import load_and_preprocess_data
 from trading_env import ForexTradingEnv
@@ -39,8 +39,7 @@ def evaluate_model(model: PPO, eval_env: DummyVecEnv, deterministic: bool = True
 
 
 def main():
-    #file_path = "data/EURUSD_15 Mins_Ask_2020.12.06_2025.12.12.csv"
-    file_path = "data/EURUSD_Hourly_Ask_2015.12.01_2025.12.16.csv"
+    file_path = "data/EURUSD_Candlestick_1_Hour_BID_01.07.2020-15.07.2023.csv"
     df, feature_cols = load_and_preprocess_data(file_path)
 
     # Time split 80/20

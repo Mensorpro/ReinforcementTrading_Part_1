@@ -38,34 +38,42 @@ def run_one_episode(model, vec_env, deterministic=True):
 
 
 def main():
-    # Choose the dataset you want to evaluate on
-    file_path = "data/EURUSD_15 Mins_Ask_2020.12.06_2025.12.12.csv"
+    file_path = "data/EURUSD_Candlestick_1_Hour_BID_01.07.2020-15.07.2023.csv"
     df, feature_cols = load_and_preprocess_data(file_path)
 
-    # If you want a true OOS test here, split and use only the test slice:
-    split_idx = int(len(df) * 0.8)
-    test_df = df.iloc[split_idx:].copy()
+    # Use same split as training: 70/15/15
+    train_idx = int(len(df) * 0.7)
+    val_idx = int(len(df) * 0.85)
+    test_df = df.iloc[val_idx:].copy()
+    
+    # Calculate normalization from full training data (train + val)
+    train_val_df = df.iloc[:val_idx].copy()
+    feature_array = train_val_df[feature_cols].values
+    feature_mean = np.mean(feature_array, axis=0)
+    feature_std = np.std(feature_array, axis=0)
 
-    # Must match training params
-    SL_OPTS = [10, 15, 25]
-    TP_OPTS = [10, 15, 25]
+    # Must match training params EXACTLY
+    SL_OPTS = [15, 30, 60]  # Same as training
+    TP_OPTS = [15, 30, 60]  # Same as training
     WIN = 30
 
     test_env = ForexTradingEnv(
         df=test_df,
-            window_size=WIN,
-            sl_options=SL_OPTS,
-            tp_options=TP_OPTS,
-            spread_pips=1.0,
-            commission_pips=0.0,
-            max_slippage_pips=0.2,
-            random_start=False,
-            episode_max_steps=None,
-            feature_columns=feature_cols,
-            hold_reward_weight=0.005,
-            open_penalty_pips=0.5,      # half a pip per open
-            time_penalty_pips=0.02,     # 0.02 pips per bar in trade
-            unrealized_delta_weight=0.0
+        window_size=WIN,
+        sl_options=SL_OPTS,
+        tp_options=TP_OPTS,
+        spread_pips=1.0,
+        commission_pips=0.0,
+        max_slippage_pips=0.2,
+        random_start=False,
+        episode_max_steps=None,
+        feature_columns=feature_cols,
+        feature_mean=feature_mean,  # Add normalization
+        feature_std=feature_std,
+        hold_reward_weight=0.0,
+        open_penalty_pips=0.5,      # Match training
+        time_penalty_pips=0.0,
+        unrealized_delta_weight=0.01  # Match training
     )
 
     vec_test_env = DummyVecEnv([lambda: test_env])
