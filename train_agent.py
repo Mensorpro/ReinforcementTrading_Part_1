@@ -265,23 +265,31 @@ def main():
     print("MODEL CONFIGURATION")
     print("=" * 60)
     
+    # Entropy decay: Start high (explore), decay fast
+    initial_ent_coef = 0.03   # Moderate exploration early
+    final_ent_coef = 0.001    # Low exploration late
+    
     # Clip range decay: Start high (big updates), end low (small updates)
     initial_clip_range = 0.2  # Standard PPO clip range
     final_clip_range = 0.05   # Conservative updates late in training
     
+    # Learning rate decay: Start high, end low
+    initial_lr = 3e-4         # Higher learning rate early
+    final_lr = 1e-5           # Very low learning rate late
+    
     model = PPO(
         policy="MlpPolicy",
         env=train_vec_env,
-        learning_rate=1e-4,           # Reduced from 3e-4 for stability
-        n_steps=4096,                 # Increased from 2048 for better value estimates
-        batch_size=64,                # Keep same
-        n_epochs=10,                  # Keep same
-        gamma=0.99,                   # Keep same
-        gae_lambda=0.95,              # Keep same
-        clip_range=initial_clip_range,# Will decay during training
-        ent_coef=0.01,                # Moderate exploration - balanced
-        vf_coef=2.0,                  # Increased to prioritize value function learning
-        max_grad_norm=0.5,            # Keep same
+        learning_rate=initial_lr,        # Will decay during training
+        n_steps=4096,                    # Increased from 2048 for better value estimates
+        batch_size=64,                   # Keep same
+        n_epochs=10,                     # Keep same
+        gamma=0.99,                      # Keep same
+        gae_lambda=0.95,                 # Keep same
+        clip_range=initial_clip_range,   # Will decay during training
+        ent_coef=initial_ent_coef,       # Will decay during training
+        vf_coef=2.0,                     # Increased to prioritize value function learning
+        max_grad_norm=0.5,               # Keep same
         policy_kwargs=dict(
             net_arch=dict(
                 pi=[256, 256, 128],      # Policy network: 3 layers
@@ -292,12 +300,12 @@ def main():
         tensorboard_log="./tensorboard_log/"
     )
     
-    print(f"Learning rate    : {model.learning_rate}")
+    print(f"Learning rate    : {initial_lr} -> {final_lr} (decaying)")
     print(f"Policy network   : {model.policy_kwargs['net_arch']['pi']}")
     print(f"Value network    : {model.policy_kwargs['net_arch']['vf']}")
     print(f"N steps          : {model.n_steps}")
     print(f"Batch size       : {model.batch_size}")
-    print(f"Entropy coef     : {model.ent_coef} (constant - balanced exploration)")
+    print(f"Entropy coef     : {initial_ent_coef} -> {final_ent_coef} (decaying)")
     print(f"Clip range       : {initial_clip_range} -> {final_clip_range} (decaying)")
     print(f"Value coef       : {model.vf_coef}")
     print()
@@ -305,6 +313,9 @@ def main():
     # ---- Callbacks ----
     ckpt_dir = "./checkpoints"
     os.makedirs(ckpt_dir, exist_ok=True)
+    
+    # Create tensorboard log directory
+    os.makedirs("./tensorboard_log", exist_ok=True)
 
     # Checkpoint every 50k steps
     checkpoint_callback = CheckpointCallback(
@@ -314,12 +325,46 @@ def main():
     )
     
     total_timesteps = 2_000_000
+    decay_steps = 1_000_000  # Complete decay in first 1M steps (faster)
+    
+    # Entropy decay: reduce exploration over time
+    entropy_decay_callback = EntropyDecayCallback(
+        initial_ent_coef=initial_ent_coef,
+        final_ent_coef=final_ent_coef,
+        decay_steps=decay_steps,
+        verbose=1
+    )
     
     # Clip range decay: make policy updates more conservative over time
     clip_range_decay_callback = ClipRangeDecayCallback(
         initial_clip_range=initial_clip_range,
         final_clip_range=final_clip_range,
-        decay_steps=total_timesteps,  # Decay over entire training
+        decay_steps=decay_steps,
+        verbose=1
+    )
+    
+    # Learning rate decay: reduce learning rate over time
+    class LearningRateDecayCallback(BaseCallback):
+        def __init__(self, initial_lr, final_lr, decay_steps, verbose=0):
+            super().__init__(verbose)
+            self.initial_lr = initial_lr
+            self.final_lr = final_lr
+            self.decay_steps = decay_steps
+            
+        def _on_step(self):
+            progress = min(self.num_timesteps / self.decay_steps, 1.0)
+            current_lr = self.initial_lr - (self.initial_lr - self.final_lr) * progress
+            self.model.learning_rate = current_lr
+            
+            if self.num_timesteps % 50000 == 0:
+                if self.verbose > 0:
+                    print(f"[Learning Rate Decay] Step {self.num_timesteps:,}: lr = {current_lr:.6f}")
+            return True
+    
+    lr_decay_callback = LearningRateDecayCallback(
+        initial_lr=initial_lr,
+        final_lr=final_lr,
+        decay_steps=decay_steps,
         verbose=1
     )
     
@@ -353,17 +398,17 @@ def main():
     print()
     print("KEY IMPROVEMENTS:")
     print("  • Ghost trades bug FIXED (last_trade_info cleared each step)")
-    print("  • Entropy coef: 0.01 (constant - balanced exploration)")
+    print("  • Learning rate decay: 3e-4 -> 1e-5 (fast learning -> fine-tuning)")
+    print("  • Entropy decay: 0.03 -> 0.001 (explore -> exploit)")
     print("  • Clip range decay: 0.2 -> 0.05 (big updates -> small updates)")
+    print("  • All decay in 1M steps (faster convergence)")
     print("  • Value coef: 2.0 (prioritize value function learning)")
     print("  • Early stopping patience: 30 (more time to converge)")
-    print("  • Open penalty: 2.0 pips (discourage overtrading)")
-    print("  • Time penalty: 0.05 pips/bar (avoid infinite holding)")
     print()
     
     model.learn(
         total_timesteps=total_timesteps, 
-        callback=[checkpoint_callback, clip_range_decay_callback, eval_callback]
+        callback=[checkpoint_callback, lr_decay_callback, entropy_decay_callback, clip_range_decay_callback, eval_callback]
     )
 
     # ---- Select best model by validation performance ----
