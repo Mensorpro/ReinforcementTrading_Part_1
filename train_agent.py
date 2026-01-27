@@ -13,7 +13,8 @@ from trading_env import ForexTradingEnv
 class EntropyDecayCallback(BaseCallback):
     """
     Callback to gradually reduce entropy coefficient during training.
-    This makes the model explore early, then exploit once it finds good strategies.
+    Uses EXPONENTIAL decay for faster reduction early, slower late.
+    This prevents catastrophic forgetting by reducing exploration quickly.
     
     Args:
         initial_ent_coef: Starting entropy coefficient (high exploration)
@@ -31,8 +32,10 @@ class EntropyDecayCallback(BaseCallback):
         # Calculate current entropy coefficient based on progress
         progress = min(self.num_timesteps / self.decay_steps, 1.0)
         
-        # Linear decay from initial to final
-        current_ent_coef = self.initial_ent_coef - (self.initial_ent_coef - self.final_ent_coef) * progress
+        # EXPONENTIAL decay: drops fast early, slow later (prevents catastrophic forgetting)
+        current_ent_coef = self.final_ent_coef + (
+            (self.initial_ent_coef - self.final_ent_coef) * (1 - progress) ** 2
+        )
         
         # Update model's entropy coefficient
         self.model.ent_coef = current_ent_coef
@@ -40,7 +43,7 @@ class EntropyDecayCallback(BaseCallback):
         # Log every 50k steps
         if self.num_timesteps % 50000 == 0:
             if self.verbose > 0:
-                print(f"\n[Entropy Decay] Step {self.num_timesteps:,}: ent_coef = {current_ent_coef:.4f} (progress: {progress*100:.1f}%)")
+                print(f"\n[Entropy Decay] Step {self.num_timesteps:,}: ent_coef = {current_ent_coef:.6f} (progress: {progress*100:.1f}%)")
         
         return True
 
@@ -48,7 +51,8 @@ class EntropyDecayCallback(BaseCallback):
 class ClipRangeDecayCallback(BaseCallback):
     """
     Callback to gradually reduce clip range during training.
-    This makes policy updates more conservative as training progresses.
+    Uses EXPONENTIAL decay to make policy updates more conservative faster.
+    This prevents catastrophic forgetting.
     
     Args:
         initial_clip_range: Starting clip range (larger updates)
@@ -66,8 +70,10 @@ class ClipRangeDecayCallback(BaseCallback):
         # Calculate current clip range based on progress
         progress = min(self.num_timesteps / self.decay_steps, 1.0)
         
-        # Linear decay from initial to final
-        current_clip_range = self.initial_clip_range - (self.initial_clip_range - self.final_clip_range) * progress
+        # EXPONENTIAL decay: drops fast early, slow later
+        current_clip_range = self.final_clip_range + (
+            (self.initial_clip_range - self.final_clip_range) * (1 - progress) ** 2
+        )
         
         # Update model's clip range (need to create a lambda that returns the value)
         self.model.clip_range = lambda _: current_clip_range
@@ -265,17 +271,17 @@ def main():
     print("MODEL CONFIGURATION")
     print("=" * 60)
     
-    # Entropy decay: Start high (explore), decay fast
-    initial_ent_coef = 0.03   # Moderate exploration early
-    final_ent_coef = 0.001    # Low exploration late
+    # Entropy decay: Start lower, decay faster to prevent catastrophic forgetting
+    initial_ent_coef = 0.02   # Lower exploration early (was 0.03)
+    final_ent_coef = 0.0001   # Much lower exploration late (was 0.001)
     
-    # Clip range decay: Start high (big updates), end low (small updates)
-    initial_clip_range = 0.2  # Standard PPO clip range
-    final_clip_range = 0.05   # Conservative updates late in training
+    # Clip range decay: Start lower, end much lower for conservative updates
+    initial_clip_range = 0.15 # Lower clip range (was 0.2)
+    final_clip_range = 0.02   # Very conservative updates late (was 0.05)
     
-    # Learning rate decay: Start high, end low
-    initial_lr = 3e-4         # Higher learning rate early
-    final_lr = 1e-5           # Very low learning rate late
+    # Learning rate: Start lower to prevent overtraining
+    initial_lr = 1e-4         # Lower learning rate (was 3e-4)
+    final_lr = 1e-6           # Very low learning rate late (was 1e-5)
     
     model = PPO(
         policy="MlpPolicy",
@@ -324,8 +330,8 @@ def main():
         name_prefix="ppo_eurusd"
     )
     
-    total_timesteps = 2_000_000
-    decay_steps = 1_000_000  # Complete decay in first 1M steps (faster)
+    total_timesteps = 500_000    # Reduced from 2M to prevent overtraining
+    decay_steps = 200_000        # Complete decay in first 200k steps (faster)
     
     # Entropy decay: reduce exploration over time
     entropy_decay_callback = EntropyDecayCallback(
@@ -343,35 +349,47 @@ def main():
         verbose=1
     )
     
-    # Learning rate decay: reduce learning rate over time
-    class LearningRateDecayCallback(BaseCallback):
-        def __init__(self, initial_lr, final_lr, decay_steps, verbose=0):
+    # Learning rate schedule: Warmup -> Plateau -> Decay
+    # This prevents catastrophic forgetting by keeping LR stable when strategy is good
+    class LearningRateScheduleCallback(BaseCallback):
+        def __init__(self, initial_lr, final_lr, verbose=0):
             super().__init__(verbose)
             self.initial_lr = initial_lr
             self.final_lr = final_lr
-            self.decay_steps = decay_steps
             
         def _on_step(self):
-            progress = min(self.num_timesteps / self.decay_steps, 1.0)
-            current_lr = self.initial_lr - (self.initial_lr - self.final_lr) * progress
+            if self.num_timesteps < 50_000:
+                # Warmup: 1e-5 -> 1e-4 (first 50k steps)
+                progress = self.num_timesteps / 50_000
+                current_lr = 1e-5 + (self.initial_lr - 1e-5) * progress
+            elif self.num_timesteps < 150_000:
+                # Plateau: keep at 1e-4 (50k-150k steps)
+                # This prevents forgetting when model finds good strategy
+                current_lr = self.initial_lr
+            else:
+                # Decay: 1e-4 -> 1e-6 (150k-500k steps)
+                progress = min((self.num_timesteps - 150_000) / 350_000, 1.0)
+                # Exponential decay for smoother transition
+                current_lr = self.final_lr + (self.initial_lr - self.final_lr) * (1 - progress) ** 2
+            
             self.model.learning_rate = current_lr
             
             if self.num_timesteps % 50000 == 0:
                 if self.verbose > 0:
-                    print(f"[Learning Rate Decay] Step {self.num_timesteps:,}: lr = {current_lr:.6f}")
+                    phase = "warmup" if self.num_timesteps < 50_000 else "plateau" if self.num_timesteps < 150_000 else "decay"
+                    print(f"[Learning Rate Schedule] Step {self.num_timesteps:,}: lr = {current_lr:.6f} ({phase})")
             return True
     
-    lr_decay_callback = LearningRateDecayCallback(
+    lr_schedule_callback = LearningRateScheduleCallback(
         initial_lr=initial_lr,
         final_lr=final_lr,
-        decay_steps=decay_steps,
         verbose=1
     )
     
     # Early stopping based on validation performance
     stop_callback = StopTrainingOnNoModelImprovement(
-        max_no_improvement_evals=30,  # Increased patience
-        min_evals=15,
+        max_no_improvement_evals=10,  # Reduced from 30 to stop earlier
+        min_evals=5,                   # Reduced from 15
         verbose=1
     )
     
@@ -466,21 +484,22 @@ def main():
     print(f"Total timesteps  : {total_timesteps:,}")
     print(f"Checkpoint freq  : 50,000 steps")
     print(f"Eval freq        : 25,000 steps")
-    print(f"Early stopping   : Enabled (patience=30)")
+    print(f"Early stopping   : Enabled (patience=10)")
     print()
-    print("KEY IMPROVEMENTS:")
-    print("  • Ghost trades bug FIXED (last_trade_info cleared each step)")
-    print("  • Learning rate decay: 3e-4 -> 1e-5 (fast learning -> fine-tuning)")
-    print("  • Entropy decay: 0.03 -> 0.001 (explore -> exploit)")
-    print("  • Clip range decay: 0.2 -> 0.05 (big updates -> small updates)")
-    print("  • All decay in 1M steps (faster convergence)")
-    print("  • Value coef: 2.0 (prioritize value function learning)")
-    print("  • Early stopping patience: 30 (more time to converge)")
+    print("ANTI-OVERFITTING IMPROVEMENTS:")
+    print("  • Reduced training: 500k steps (was 2M)")
+    print("  • Smaller network: [128,64] policy, [128,128,64] value")
+    print("  • Fewer features: 15 (was 29)")
+    print("  • More episode diversity: 60 starting positions, no max length")
+    print("  • Learning rate schedule: warmup (0-50k) -> plateau (50k-150k) -> decay (150k-500k)")
+    print("  • Exponential entropy decay: 0.02 -> 0.0001 (fast reduction)")
+    print("  • Exponential clip decay: 0.15 -> 0.02 (conservative updates)")
+    print("  • Early stopping: 10 evals (was 30)")
     print()
     
     model.learn(
         total_timesteps=total_timesteps, 
-        callback=[checkpoint_callback, lr_decay_callback, entropy_decay_callback, clip_range_decay_callback, eval_callback]
+        callback=[checkpoint_callback, lr_schedule_callback, entropy_decay_callback, clip_range_decay_callback, eval_callback]
     )
 
     # ---- Select best model by validation performance ----
