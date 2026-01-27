@@ -195,8 +195,8 @@ def main():
             commission_pips=0.0,
             max_slippage_pips=0.2,
             random_start=True,
-            min_episode_steps=1000,
-            episode_max_steps=2000,
+            min_episode_steps=200,           # Reduced for maximum diversity (~60 starting positions)
+            episode_max_steps=None,          # Removed cap - let episodes run full length
             feature_columns=feature_cols,
             open_penalty_pips=2.0,          # Stop overtrading
             time_penalty_pips=0.05,         # Cost per bar in trade
