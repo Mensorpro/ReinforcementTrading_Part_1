@@ -130,45 +130,32 @@ def load_and_preprocess_data(csv_path: str):
     df.dropna(inplace=True)
 
     # Columns the AGENT should see (scale-invariant features only)
+    # Reduced from 29 to 15 features to combat overfitting
     feature_cols = [
-        # Momentum
-        "rsi_14",
-        "rsi_9",
-        "macd_norm",
-        "macd_hist_norm",
-        "stoch_k",
-        "stoch_d",
-        "roc_10",
+        # Momentum (3 features - removed redundant RSI_9, MACD_norm, stoch_d, roc_10)
+        "rsi_14",           # Overbought/oversold (slower, more reliable)
+        "macd_hist_norm",   # Momentum divergence (histogram captures trend changes)
+        "stoch_k",          # Fast oscillator (complements RSI)
         
-        # Volatility
-        "bb_width",
-        "bb_position",
-        "atr_change",
+        # Volatility (3 features - keep all, non-redundant)
+        "bb_width",         # Volatility expansion/contraction
+        "bb_position",      # Price position in bands (mean reversion signal)
+        "atr_change",       # Volatility regime shifts
         
-        # Trend
-        "adx",
-        "di_plus",
-        "di_minus",
-        "close_ema9_dist",
-        "close_ema21_dist",
-        "close_ema50_dist",
-        "close_ema200_dist",
-        "ema_9_slope",
-        "ema_21_slope",
-        "ema_50_slope",
-        "ema_9_21_spread",
-        "ema_21_50_spread",
-        "ema_50_200_spread",
+        # Trend (6 features - removed redundant EMA distances/slopes/spreads)
+        "adx",              # Trend strength (key for filtering)
+        "di_plus",          # Bullish directional pressure
+        "di_minus",         # Bearish directional pressure
+        "close_ema21_dist", # Medium-term trend distance (most useful timeframe)
+        "ema_21_slope",     # Medium-term trend direction
+        "ema_50_200_spread",# Long-term trend (golden/death cross)
         
-        # Volume
-        "obv_momentum",
-        "volume_roc",
+        # Volume (2 features - keep all, non-redundant)
+        "obv_momentum",     # Accumulation/distribution
+        "volume_roc",       # Volume spikes (breakout confirmation)
         
-        # Candle patterns
-        "candle_body",
-        "candle_range",
-        "upper_wick",
-        "lower_wick",
+        # Candle patterns (1 feature - removed redundant wick/range features)
+        "candle_body",      # Bullish/bearish pressure (most informative)
     ]
 
     return df, feature_cols

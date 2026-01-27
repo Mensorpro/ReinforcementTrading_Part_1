@@ -191,15 +191,18 @@ def prepare_data_for_testing(df):
     df_indexed["lower_wick"] = (df_indexed[["Open", "Close"]].min(axis=1) - df_indexed["Low"]) / df_indexed["atr_14"]
     
     # Feature columns (same as training)
+    # Reduced from 29 to 15 to combat overfitting
     feature_cols = [
-        "rsi_14", "rsi_9", "macd_norm", "macd_hist_norm", "stoch_k", "stoch_d", "roc_10",
+        # Momentum (3)
+        "rsi_14", "macd_hist_norm", "stoch_k",
+        # Volatility (3)
         "bb_width", "bb_position", "atr_change",
-        "adx", "di_plus", "di_minus",
-        "close_ema9_dist", "close_ema21_dist", "close_ema50_dist", "close_ema200_dist",
-        "ema_9_slope", "ema_21_slope", "ema_50_slope",
-        "ema_9_21_spread", "ema_21_50_spread", "ema_50_200_spread",
+        # Trend (6)
+        "adx", "di_plus", "di_minus", "close_ema21_dist", "ema_21_slope", "ema_50_200_spread",
+        # Volume (2)
         "obv_momentum", "volume_roc",
-        "candle_body", "candle_range", "upper_wick", "lower_wick"
+        # Candle (1)
+        "candle_body"
     ]
     
     # CRITICAL FIX: Apply final safety clipping to all features

@@ -28,16 +28,19 @@ def load_live_data():
     # Load with Time as index (matching training format)
     df = pd.read_csv(filepath, index_col=0, parse_dates=True)
     
-    # Use ONLY the same 29 features as training (in the same order)
+    # Use ONLY the same 15 features as training (in the same order)
+    # Reduced from 29 to combat overfitting
     feature_cols = [
-        "rsi_14", "rsi_9", "macd_norm", "macd_hist_norm", "stoch_k", "stoch_d", "roc_10",
+        # Momentum (3)
+        "rsi_14", "macd_hist_norm", "stoch_k",
+        # Volatility (3)
         "bb_width", "bb_position", "atr_change",
-        "adx", "di_plus", "di_minus",
-        "close_ema9_dist", "close_ema21_dist", "close_ema50_dist", "close_ema200_dist",
-        "ema_9_slope", "ema_21_slope", "ema_50_slope",
-        "ema_9_21_spread", "ema_21_50_spread", "ema_50_200_spread",
+        # Trend (6)
+        "adx", "di_plus", "di_minus", "close_ema21_dist", "ema_21_slope", "ema_50_200_spread",
+        # Volume (2)
         "obv_momentum", "volume_roc",
-        "candle_body", "candle_range", "upper_wick", "lower_wick"
+        # Candle (1)
+        "candle_body"
     ]
     
     # Check if all required features exist
@@ -73,16 +76,19 @@ def load_trained_model():
     print("=" * 60)
     print(f"Model: {model_path}")
     
-    # Create dummy env with all 29 features (same as training)
+    # Create dummy env with all 15 features (same as training)
+    # Reduced from 29 to combat overfitting
     feature_cols = [
-        "rsi_14", "rsi_9", "macd_norm", "macd_hist_norm", "stoch_k", "stoch_d", "roc_10",
+        # Momentum (3)
+        "rsi_14", "macd_hist_norm", "stoch_k",
+        # Volatility (3)
         "bb_width", "bb_position", "atr_change",
-        "adx", "di_plus", "di_minus",
-        "close_ema9_dist", "close_ema21_dist", "close_ema50_dist", "close_ema200_dist",
-        "ema_9_slope", "ema_21_slope", "ema_50_slope",
-        "ema_9_21_spread", "ema_21_50_spread", "ema_50_200_spread",
+        # Trend (6)
+        "adx", "di_plus", "di_minus", "close_ema21_dist", "ema_21_slope", "ema_50_200_spread",
+        # Volume (2)
         "obv_momentum", "volume_roc",
-        "candle_body", "candle_range", "upper_wick", "lower_wick"
+        # Candle (1)
+        "candle_body"
     ]
     
     dummy_data = {
