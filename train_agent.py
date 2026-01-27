@@ -117,7 +117,7 @@ def evaluate_model(model: PPO, eval_env: DummyVecEnv, deterministic: bool = True
     obs = eval_env.reset()
     equity_curve = []
     trades = []
-    action_counts = {0: 0, 1: 0, 2: 0, 3: 0}  # Track action distribution
+    action_counts = {0: 0, 1: 0, 2: 0}  # Track action distribution (3 actions: HOLD, LONG, SHORT)
 
     while True:
         action, _ = model.predict(obs, deterministic=deterministic)
@@ -156,13 +156,12 @@ def evaluate_model(model: PPO, eval_env: DummyVecEnv, deterministic: bool = True
         metrics["win_rate"] = 0.0
         metrics["num_trades"] = 0
     
-    # Add action distribution
+    # Add action distribution (3 actions: HOLD, LONG, SHORT)
     total_actions = sum(action_counts.values())
     metrics["action_distribution"] = {
         "HOLD": (action_counts[0] / total_actions * 100) if total_actions > 0 else 0,
-        "CLOSE": (action_counts[1] / total_actions * 100) if total_actions > 0 else 0,
-        "LONG": (action_counts[2] / total_actions * 100) if total_actions > 0 else 0,
-        "SHORT": (action_counts[3] / total_actions * 100) if total_actions > 0 else 0,
+        "LONG": (action_counts[1] / total_actions * 100) if total_actions > 0 else 0,
+        "SHORT": (action_counts[2] / total_actions * 100) if total_actions > 0 else 0,
     }
     
     return equity_curve, metrics
@@ -434,7 +433,6 @@ def main():
                 if action_dist:
                     output += f"  Actions:\n"
                     output += f"    HOLD : {action_dist['HOLD']:5.1f}%\n"
-                    output += f"    CLOSE: {action_dist['CLOSE']:5.1f}%\n"
                     output += f"    LONG : {action_dist['LONG']:5.1f}%\n"
                     output += f"    SHORT: {action_dist['SHORT']:5.1f}%\n"
                 
@@ -543,7 +541,6 @@ def main():
         if action_dist:
             print(f"  Action Distribution:")
             print(f"    HOLD : {action_dist['HOLD']:5.1f}%")
-            print(f"    CLOSE: {action_dist['CLOSE']:5.1f}%")
             print(f"    LONG : {action_dist['LONG']:5.1f}%")
             print(f"    SHORT: {action_dist['SHORT']:5.1f}%")
     
