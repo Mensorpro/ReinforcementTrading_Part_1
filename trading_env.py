@@ -115,14 +115,13 @@ class ForexTradingEnv(gym.Env):
 
         self.allow_flip = bool(allow_flip)
 
-        # --- Actions (Simplified to 4 actions) ---
+        # --- Actions (Simplified to 3 actions - NO MANUAL CLOSE) ---
         # 0: HOLD
-        # 1: CLOSE
-        # 2: LONG (SL/TP calculated dynamically from ATR)
-        # 3: SHORT (SL/TP calculated dynamically from ATR)
+        # 1: LONG (SL/TP calculated dynamically from ATR)
+        # 2: SHORT (SL/TP calculated dynamically from ATR)
+        # Removed CLOSE action to force proper risk-reward ratio
         self.action_map = [
             ("HOLD", None),
-            ("CLOSE", None),
             ("LONG", 1),   # direction: 1 = long
             ("SHORT", -1)  # direction: -1 = short
         ]
@@ -442,26 +441,6 @@ class ForexTradingEnv(gym.Env):
         # 1) Apply action logic
         if act_type == "HOLD":
             pass
-
-        elif act_type == "CLOSE":
-            if self.position != 0:
-                # Close at current close (with slippage)
-                close_price = float(self.df.loc[self.current_step, "Close"])
-                slip_pips = self._sample_slippage_pips()
-                slip_price = slip_pips * self.pip_value
-                exit_price = close_price - slip_price if self.position == 1 else close_price + slip_price
-                net_pips = self._close_position("MANUAL_CLOSE", exit_price)
-                
-                # Component 1: Profit (dense, bounded with log)
-                # Scaled down to fit in [-1, +1] range
-                if net_pips > 0:
-                    reward += 0.05 * np.log(1 + net_pips)  # ~0.15 for +20 pips
-                # Component 2: Loss penalty (1.5x stronger than profit)
-                else:
-                    reward -= 0.075 * abs(np.log(1 + abs(net_pips)))  # ~-0.24 for -23 pips
-                
-                # Component 3: Trading cost penalty
-                reward -= 0.05  # Small fixed cost
 
         elif act_type in ["LONG", "SHORT"]:
             if self.position == 0:

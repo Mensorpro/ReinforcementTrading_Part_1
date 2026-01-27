@@ -201,13 +201,13 @@ def main():
             commission_pips=0.0,
             max_slippage_pips=0.2,
             random_start=True,
-            min_episode_steps=200,           # Reduced for maximum diversity (~60 starting positions)
-            episode_max_steps=None,          # Removed cap - let episodes run full length
+            min_episode_steps=200,
+            episode_max_steps=None,
             feature_columns=feature_cols,
-            open_penalty_pips=2.0,          # Stop overtrading
-            time_penalty_pips=0.05,         # Cost per bar in trade
-            atr_sl_multiplier=1.5,
-            atr_tp_multiplier=3.0
+            open_penalty_pips=5.0,          # Increased from 2.0 to reduce overtrading
+            time_penalty_pips=0.1,          # Increased from 0.05 to encourage faster exits
+            atr_sl_multiplier=1.0,          # Tighter stop (was 1.5)
+            atr_tp_multiplier=2.0           # Closer target (was 3.0) - 1:2 risk-reward
         )
 
     # Train-eval env: deterministic start, NO random starts (so curve is stable/reproducible)
@@ -221,10 +221,10 @@ def main():
             random_start=False,
             episode_max_steps=None,
             feature_columns=feature_cols,
-            open_penalty_pips=2.0,
-            time_penalty_pips=0.05,
-            atr_sl_multiplier=1.5,
-            atr_tp_multiplier=3.0
+            open_penalty_pips=5.0,
+            time_penalty_pips=0.1,
+            atr_sl_multiplier=1.0,
+            atr_tp_multiplier=2.0
         )
 
     # Test-eval env: deterministic
@@ -238,10 +238,10 @@ def main():
             random_start=False,
             episode_max_steps=None,
             feature_columns=feature_cols,
-            open_penalty_pips=2.0,
-            time_penalty_pips=0.05,
-            atr_sl_multiplier=1.5,
-            atr_tp_multiplier=3.0
+            open_penalty_pips=5.0,
+            time_penalty_pips=0.1,
+            atr_sl_multiplier=1.0,
+            atr_tp_multiplier=2.0
         )
     
     # Validation env: for early stopping
@@ -255,10 +255,10 @@ def main():
             random_start=False,
             episode_max_steps=None,
             feature_columns=feature_cols,
-            open_penalty_pips=2.0,
-            time_penalty_pips=0.05,
-            atr_sl_multiplier=1.5,
-            atr_tp_multiplier=3.0
+            open_penalty_pips=5.0,
+            time_penalty_pips=0.1,
+            atr_sl_multiplier=1.0,
+            atr_tp_multiplier=2.0
         )
 
     train_vec_env = DummyVecEnv([make_train_env])

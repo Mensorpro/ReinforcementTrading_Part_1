@@ -96,10 +96,10 @@ def create_test_env(df, feature_cols):
             random_start=False,
             episode_max_steps=None,
             feature_columns=feature_cols,
-            open_penalty_pips=2.0,
-            time_penalty_pips=0.05,
-            atr_sl_multiplier=1.5,
-            atr_tp_multiplier=3.0
+            open_penalty_pips=5.0,          # Match training
+            time_penalty_pips=0.1,          # Match training
+            atr_sl_multiplier=1.0,          # Match training
+            atr_tp_multiplier=2.0           # Match training
         )
     
     return DummyVecEnv([make_env])
