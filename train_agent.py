@@ -292,8 +292,8 @@ def main():
         max_grad_norm=0.5,               # Keep same
         policy_kwargs=dict(
             net_arch=dict(
-                pi=[256, 256, 128],      # Policy network: 3 layers
-                vf=[512, 512, 256, 128]  # Value network: 4 layers, BIGGER!
+                pi=[128, 64],            # Policy network: 2 layers (reduced to combat overfitting)
+                vf=[128, 128, 64]        # Value network: 3 layers (reduced to combat overfitting)
             )
         ),
         verbose=1,
