@@ -296,6 +296,7 @@ def main():
         ent_coef=initial_ent_coef,       # Will decay during training
         vf_coef=2.0,                     # Increased to prioritize value function learning
         max_grad_norm=0.5,               # Keep same
+        device='cpu',                    # MlpPolicy runs faster on CPU than GPU
         policy_kwargs=dict(
             net_arch=dict(
                 pi=[128, 64],            # Policy network: 2 layers (reduced to combat overfitting)

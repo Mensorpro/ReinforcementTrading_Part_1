@@ -129,9 +129,9 @@ class ForexTradingEnv(gym.Env):
 
         self.action_space = spaces.Discrete(len(self.action_map))
 
-        # Observation features: df columns + 3 state features
+        # Observation features: df columns + 4 state features (Account State)
         self.base_num_features = len(self.feature_columns)
-        self.state_num_features = 3
+        self.state_num_features = 4  # position, time_in_trade, unrealized_pnl, drawdown
         self.num_features = self.base_num_features + self.state_num_features
 
         self.observation_space = spaces.Box(
@@ -167,18 +167,42 @@ class ForexTradingEnv(gym.Env):
         # Accounting
         self.initial_equity_usd = 10000.0
         self.equity_usd = self.initial_equity_usd
+        self.peak_equity_usd = self.initial_equity_usd  # Track peak for drawdown calculation
 
         # Logging
         self.equity_curve = []
         self.last_trade_info = None
 
     def _get_state_features(self):
-        # position in [-1,0,1], time normalized, unrealized in pips (scaled)
+        """
+        Account State features (The "Health" - Professional PPO Strategy):
+        1. Position: -1 (short), 0 (flat), +1 (long)
+        2. Time in trade: normalized by typical trade duration (100 bars)
+        3. Unrealized PnL: normalized by risk (SL distance in pips) - "R multiple"
+        4. Drawdown: current distance from peak equity [0, 1]
+        
+        These features tell the agent about its "health" and risk exposure.
+        """
+        # 1. Position: already in [-1, 0, 1]
         pos = float(self.position)
-        t_norm = float(self.time_in_trade) / 1000.0
-        unreal_pips = float(self._compute_unrealized_pips()) if self.position != 0 else 0.0
-        unreal_scaled = unreal_pips / 100.0  # prevent huge magnitudes
-        return np.array([pos, t_norm, unreal_scaled], dtype=np.float32)
+        
+        # 2. Time in trade: normalize by typical duration (100 bars), clip to [0, 1]
+        t_norm = np.clip(float(self.time_in_trade) / 100.0, 0.0, 1.0)
+        
+        # 3. Unrealized PnL: normalize by risk taken (SL distance)
+        if self.position != 0 and self.sl_pips > 0:
+            unreal_pips = float(self._compute_unrealized_pips())
+            # Express as multiple of risk: +1.0 = +1R (at TP), -1.0 = -1R (at SL)
+            unreal_scaled = np.clip(unreal_pips / self.sl_pips, -2.0, 2.0)
+        else:
+            unreal_scaled = 0.0
+        
+        # 4. Drawdown: (PeakEquity - CurrentEquity) / InitialBalance ∈ [0, 1]
+        # This tells the agent how much it's "down" from its peak
+        drawdown = (self.peak_equity_usd - self.equity_usd) / self.initial_equity_usd
+        drawdown_norm = np.clip(drawdown, 0.0, 1.0)  # 0 = at peak, 1 = lost 100%
+        
+        return np.array([pos, t_norm, unreal_scaled, drawdown_norm], dtype=np.float32)
 
     def _compute_unrealized_pips(self):
         if self.position == 0 or self.entry_price is None:
@@ -294,6 +318,10 @@ class ForexTradingEnv(gym.Env):
 
         # Update equity in USD
         self.equity_usd += net_pips * self.usd_per_pip
+        
+        # Update peak equity for drawdown calculation
+        if self.equity_usd > self.peak_equity_usd:
+            self.peak_equity_usd = self.equity_usd
 
         trade_info = {
             "event": "CLOSE",
@@ -405,8 +433,8 @@ class ForexTradingEnv(gym.Env):
         # Clear last trade info at start of step (prevents ghost trades)
         self.last_trade_info = None
 
-        # Reward components
-        reward_pips = 0.0
+        # Reward components (PPO-optimized system with tuned coefficients)
+        reward = 0.0
         info = {}
 
         act_type, direction = self.action_map[int(action)]
@@ -422,52 +450,70 @@ class ForexTradingEnv(gym.Env):
                 slip_pips = self._sample_slippage_pips()
                 slip_price = slip_pips * self.pip_value
                 exit_price = close_price - slip_price if self.position == 1 else close_price + slip_price
-                reward_pips += self._close_position("MANUAL_CLOSE", exit_price)
+                net_pips = self._close_position("MANUAL_CLOSE", exit_price)
+                
+                # Component 1: Profit (dense, bounded with log)
+                # Scaled down to fit in [-1, +1] range
+                if net_pips > 0:
+                    reward += 0.05 * np.log(1 + net_pips)  # ~0.15 for +20 pips
+                # Component 2: Loss penalty (1.5x stronger than profit)
+                else:
+                    reward -= 0.075 * abs(np.log(1 + abs(net_pips)))  # ~-0.24 for -23 pips
+                
+                # Component 3: Trading cost penalty
+                reward -= 0.05  # Small fixed cost
 
         elif act_type in ["LONG", "SHORT"]:
             if self.position == 0:
                 self._open_position(direction=direction)
-                # penalty for opening a trade to discourage overtrading
-                reward_pips -= self.open_penalty_pips
             else:
                 if self.allow_flip:
                     close_price = float(self.df.loc[self.current_step, "Close"])
-                    reward_pips += self._close_position("FLIP_CLOSE", close_price)
+                    net_pips = self._close_position("FLIP_CLOSE", close_price)
+                    
+                    # Apply profit/loss rewards
+                    if net_pips > 0:
+                        reward += 0.05 * np.log(1 + net_pips)
+                    else:
+                        reward -= 0.075 * abs(np.log(1 + abs(net_pips)))
+                    reward -= 0.05
+                    
                     self._open_position(direction=direction)
-                    reward_pips -= self.open_penalty_pips
 
         # 2) Advance time FIRST
+        prev_equity = self.equity_usd
         self.current_step += 1
 
         # 3) THEN check SL/TP on the new current bar (no future data!)
         realized_now = self._check_sl_tp_intrabar_and_maybe_close()
         if realized_now is not None:
-            # Just add the realized pips (already includes costs)
-            reward_pips += realized_now
+            # Apply profit/loss rewards
+            if realized_now > 0:
+                reward += 0.05 * np.log(1 + realized_now)
+            else:
+                reward -= 0.075 * abs(np.log(1 + abs(realized_now)))
+            reward -= 0.05
 
-        # 4) If still open, apply reward shaping
+        # Component 2b: Continuous drawdown penalty
+        equity_delta = self.equity_usd - prev_equity
+        if equity_delta < 0:
+            # Punish equity drops continuously (scaled for typical drawdowns)
+            reward -= 0.01 * abs(equity_delta) / 10.0  # ~-0.23 for -230 USD drop
+
+        # 4) If still open, apply risk/exposure penalty
         if self.position != 0:
             self.time_in_trade += 1
-
-            unreal_now = self._compute_unrealized_pips()
-            delta_unreal = unreal_now - self.prev_unrealized_pips
             
-            # Track maximum unrealized profit for drawdown penalty
+            # Component 4: Risk/exposure penalty (not time penalty)
+            # Penalty based on risk taken (ATR × bars held)
+            current_atr = float(self.df.loc[self.current_step, "atr_14"])
+            risk_exposure = current_atr * self.time_in_trade / self.pip_value
+            reward -= 0.001 * risk_exposure / 10.0  # ~-0.003 for typical hold
+
+            # Update unrealized tracking (for info only, not reward)
+            unreal_now = self._compute_unrealized_pips()
             if unreal_now > self.max_unrealized_pips:
                 self.max_unrealized_pips = unreal_now
-
-            # === DRAWDOWN PENALTY ===
-            # Penalize letting significant profits slip away
-            if self.max_unrealized_pips > 10:
-                profit_retention = unreal_now / self.max_unrealized_pips
-                if profit_retention < 0.5:  # Lost more than 50% of peak profit
-                    drawdown_penalty = (0.5 - profit_retention) * 5.0
-                    reward_pips -= drawdown_penalty
-
-            # === TIME PENALTY ===
-            # Small cost per bar in a trade to avoid infinite holding
-            reward_pips -= self.time_penalty_pips
-
             self.prev_unrealized_pips = unreal_now
 
         # 5) Termination / truncation
@@ -483,15 +529,15 @@ class ForexTradingEnv(gym.Env):
         # 7) Build observation
         obs = self._get_observation()
 
-        # 8) Final reward scaling
-        reward = float(reward_pips) * self.reward_scale
+        # 8) MANDATORY: Clip reward to [-1, +1] for PPO stability
+        reward = float(np.clip(reward, -1.0, 1.0))
 
         # 9) Info
         info.update({
             "equity_usd": float(self.equity_usd),
             "position": int(self.position),
             "time_in_trade": int(self.time_in_trade),
-            "reward_pips": float(reward_pips),
+            "reward": float(reward),
             "last_trade_info": self.last_trade_info
         })
 

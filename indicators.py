@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 import pandas_ta as ta
 
@@ -129,33 +130,102 @@ def load_and_preprocess_data(csv_path: str):
     # Drop initial NaNs from indicators
     df.dropna(inplace=True)
 
-    # Columns the AGENT should see (scale-invariant features only)
-    # Reduced from 29 to 15 features to combat overfitting
+    # === PROPER NORMALIZATION (User-specified formulas) ===
+    
+    # 1. RSI: Normalize to [-1, 1]: RSI/50 - 1
+    df["rsi_14_norm"] = df["rsi_14"] / 50.0 - 1.0
+    df["stoch_k_norm"] = df["stoch_k"] / 50.0 - 1.0
+    
+    # 2. MACD: Use tanh scaling for bounded output
+    df["macd_hist_tanh"] = np.tanh(df["macd_hist_norm"] / 0.05)  # s=0.05 for MACD histogram
+    
+    # 3. ATR: Scale relative to price, then normalize
+    df["atr_relative"] = df["atr_14"] / df["Close"]
+    # Rescale to [-1, 1] using typical range (0.001 to 0.01 for EURUSD)
+    df["atr_norm"] = np.clip((df["atr_relative"] - 0.005) / 0.005, -1.0, 1.0)
+    
+    # 4. BB width: Already relative, normalize to [-1, 1] (typical range 0.01-0.05)
+    df["bb_width_norm"] = np.clip((df["bb_width"] - 0.03) / 0.03, -1.0, 1.0)
+    
+    # 5. BB position: Already in [0, 1], convert to [-1, 1] and clip outliers
+    df["bb_position_norm"] = np.clip(df["bb_position"] * 2.0 - 1.0, -1.0, 1.0)
+    
+    # 6. ATR change: Clip to reasonable range
+    df["atr_change_norm"] = np.clip(df["atr_change"] / 0.1, -1.0, 1.0)
+    
+    # 7. ADX: Normalize to [0, 1] (ADX is 0-100)
+    df["adx_norm"] = df["adx"] / 100.0
+    
+    # 8. DI+/DI-: Normalize to [0, 1] (typically 0-50)
+    df["di_plus_norm"] = np.clip(df["di_plus"] / 50.0, 0.0, 1.0)
+    df["di_minus_norm"] = np.clip(df["di_minus"] / 50.0, 0.0, 1.0)
+    
+    # 9. EMA distances: Already normalized by ATR, just clip
+    df["close_ema21_dist_norm"] = np.clip(df["close_ema21_dist"] / 5.0, -1.0, 1.0)
+    df["ema_21_slope_norm"] = np.clip(df["ema_21_slope"] / 2.0, -1.0, 1.0)
+    df["ema_50_200_spread_norm"] = np.clip(df["ema_50_200_spread"] / 10.0, -1.0, 1.0)
+    
+    # 10. OBV momentum: Clip to reasonable range
+    df["obv_momentum_norm"] = np.clip(df["obv_momentum"] / 0.5, -1.0, 1.0)
+    
+    # 11. Volume ROC: Clip to prevent explosions (seen in live data)
+    df["volume_roc_norm"] = np.clip(df["volume_roc"] / 100.0, -1.0, 1.0)
+    
+    # 12. Candle body: Already normalized by ATR, just clip
+    df["candle_body_norm"] = np.clip(df["candle_body"] / 2.0, -1.0, 1.0)
+    
+    # === TEMPORAL CONTEXT (Cyclical Time Encoding) ===
+    # Sin/Cos encoding for hour of day (captures session liquidity patterns)
+    df['hour'] = df.index.hour
+    df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
+    df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24)
+    
+    # Day of week encoding (captures weekly patterns)
+    df['day_of_week'] = df.index.dayofweek
+    df['day_sin'] = np.sin(2 * np.pi * df['day_of_week'] / 7)
+    df['day_cos'] = np.cos(2 * np.pi * df['day_of_week'] / 7)
+    
+    # Drop any remaining NaNs from normalization
+    df.dropna(inplace=True)
+
+    # Columns the AGENT should see (NORMALIZED features in [-1, 1] range)
+    # Following "The Three Eyes" professional strategy:
+    # A. Market Context (15 features)
+    # B. Account State (3 features - added in environment)
+    # C. Temporal Context (4 features - cyclical time)
     feature_cols = [
-        # Momentum (3 features - removed redundant RSI_9, MACD_norm, stoch_d, roc_10)
-        "rsi_14",           # Overbought/oversold (slower, more reliable)
-        "macd_hist_norm",   # Momentum divergence (histogram captures trend changes)
-        "stoch_k",          # Fast oscillator (complements RSI)
+        # === A. MARKET CONTEXT (15 features) ===
         
-        # Volatility (3 features - keep all, non-redundant)
-        "bb_width",         # Volatility expansion/contraction
-        "bb_position",      # Price position in bands (mean reversion signal)
-        "atr_change",       # Volatility regime shifts
+        # Momentum (3 features)
+        "rsi_14_norm",           # Overbought/oversold [-1, 1]
+        "macd_hist_tanh",        # Momentum divergence [-1, 1]
+        "stoch_k_norm",          # Fast oscillator [-1, 1]
         
-        # Trend (6 features - removed redundant EMA distances/slopes/spreads)
-        "adx",              # Trend strength (key for filtering)
-        "di_plus",          # Bullish directional pressure
-        "di_minus",         # Bearish directional pressure
-        "close_ema21_dist", # Medium-term trend distance (most useful timeframe)
-        "ema_21_slope",     # Medium-term trend direction
-        "ema_50_200_spread",# Long-term trend (golden/death cross)
+        # Volatility (3 features)
+        "bb_width_norm",         # Volatility expansion/contraction [-1, 1]
+        "bb_position_norm",      # Price position in bands [-1, 1]
+        "atr_change_norm",       # Volatility regime shifts [-1, 1]
         
-        # Volume (2 features - keep all, non-redundant)
-        "obv_momentum",     # Accumulation/distribution
-        "volume_roc",       # Volume spikes (breakout confirmation)
+        # Trend (6 features)
+        "adx_norm",              # Trend strength [0, 1]
+        "di_plus_norm",          # Bullish directional pressure [0, 1]
+        "di_minus_norm",         # Bearish directional pressure [0, 1]
+        "close_ema21_dist_norm", # Medium-term trend distance [-1, 1]
+        "ema_21_slope_norm",     # Medium-term trend direction [-1, 1]
+        "ema_50_200_spread_norm",# Long-term trend [-1, 1]
         
-        # Candle patterns (1 feature - removed redundant wick/range features)
-        "candle_body",      # Bullish/bearish pressure (most informative)
+        # Volume (2 features)
+        "obv_momentum_norm",     # Accumulation/distribution [-1, 1]
+        "volume_roc_norm",       # Volume spikes [-1, 1]
+        
+        # Candle patterns (1 feature)
+        "candle_body_norm",      # Bullish/bearish pressure [-1, 1]
+        
+        # === C. TEMPORAL CONTEXT (4 features) ===
+        "hour_sin",              # Hour of day (cyclical) [-1, 1]
+        "hour_cos",              # Hour of day (cyclical) [-1, 1]
+        "day_sin",               # Day of week (cyclical) [-1, 1]
+        "day_cos",               # Day of week (cyclical) [-1, 1]
     ]
 
     return df, feature_cols

@@ -1,5 +1,6 @@
 """
 Test the trained model on live MT5 data
+Uses the same preprocessing as training (indicators.py)
 """
 import os
 import sys
@@ -14,10 +15,11 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 from trading_env import ForexTradingEnv
+from indicators import load_and_preprocess_data
 
 
 def load_live_data():
-    """Load the prepared live data"""
+    """Load the prepared live data using SAME preprocessing as training"""
     filepath = "live_testing/live_eurusd_data.csv"
     
     if not os.path.exists(filepath):
@@ -25,44 +27,23 @@ def load_live_data():
         print("\nPlease run 'python live_testing/fetch_mt5_data.py' first")
         return None, None
     
-    # Load with Time as index (matching training format)
-    df = pd.read_csv(filepath, index_col=0, parse_dates=True)
-    
-    # Use ONLY the same 15 features as training (in the same order)
-    # Reduced from 29 to combat overfitting
-    feature_cols = [
-        # Momentum (3)
-        "rsi_14", "macd_hist_norm", "stoch_k",
-        # Volatility (3)
-        "bb_width", "bb_position", "atr_change",
-        # Trend (6)
-        "adx", "di_plus", "di_minus", "close_ema21_dist", "ema_21_slope", "ema_50_200_spread",
-        # Volume (2)
-        "obv_momentum", "volume_roc",
-        # Candle (1)
-        "candle_body"
-    ]
-    
-    # Check if all required features exist
-    missing_features = [col for col in feature_cols if col not in df.columns]
-    if missing_features:
-        print(f"✗ Missing features in data: {missing_features}")
-        return None, None
+    # Use the SAME preprocessing function as training
+    df, feature_cols = load_and_preprocess_data(filepath)
     
     print("=" * 60)
     print("LIVE DATA LOADED")
     print("=" * 60)
     print(f"Total bars: {len(df):,}")
     print(f"Date range: {df.index.min()} to {df.index.max()}")
-    print(f"Features: {len(feature_cols)} (matching training)")
+    print(f"Features: {len(feature_cols)} (19 market context)")
     print(f"Latest close: {df['Close'].iloc[-1]:.5f}")
-    print(f"Index type: {type(df.index).__name__} (matching training)")
+    print(f"Observation space: (30, {len(feature_cols) + 4}) = (window, market + state)")
     print()
     
     return df, feature_cols
 
 
-def load_trained_model():
+def load_trained_model(feature_cols):
     """Load the best trained model"""
     model_path = "model_eurusd_best.zip"
     
@@ -76,21 +57,7 @@ def load_trained_model():
     print("=" * 60)
     print(f"Model: {model_path}")
     
-    # Create dummy env with all 15 features (same as training)
-    # Reduced from 29 to combat overfitting
-    feature_cols = [
-        # Momentum (3)
-        "rsi_14", "macd_hist_norm", "stoch_k",
-        # Volatility (3)
-        "bb_width", "bb_position", "atr_change",
-        # Trend (6)
-        "adx", "di_plus", "di_minus", "close_ema21_dist", "ema_21_slope", "ema_50_200_spread",
-        # Volume (2)
-        "obv_momentum", "volume_roc",
-        # Candle (1)
-        "candle_body"
-    ]
-    
+    # Create dummy env with same features as training
     dummy_data = {
         'Open': [1.0] * 50, 
         'High': [1.0] * 50, 
@@ -111,6 +78,7 @@ def load_trained_model():
     
     model = PPO.load(model_path, env=dummy_env)
     print("✓ Model loaded successfully")
+    print(f"✓ Expected observation: (30, {len(feature_cols) + 4})")
     print()
     
     return model
@@ -348,7 +316,7 @@ def main():
         return
     
     # Load model
-    model = load_trained_model()
+    model = load_trained_model(feature_cols)
     if model is None:
         return
     
