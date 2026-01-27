@@ -375,15 +375,87 @@ def main():
         verbose=1
     )
     
-    # Evaluate on validation set every 25k steps
-    eval_callback = EvalCallback(
-        val_eval_env,
-        callback_after_eval=stop_callback,
+    # Custom evaluation callback with action distribution
+    class CustomEvalCallback(BaseCallback):
+        def __init__(self, eval_env, eval_freq, best_model_save_path, 
+                     log_path, stop_callback, verbose=1):
+            super().__init__(verbose)
+            self.eval_env = eval_env
+            self.eval_freq = eval_freq
+            self.best_model_save_path = best_model_save_path
+            self.log_path = log_path
+            self.stop_callback = stop_callback
+            self.best_mean_reward = -np.inf
+            self.evaluations_since_best = 0
+            self.eval_log_file = os.path.join(log_path, "evaluations.txt")
+            
+            os.makedirs(best_model_save_path, exist_ok=True)
+            os.makedirs(log_path, exist_ok=True)
+            
+            # Create log file with header
+            with open(self.eval_log_file, 'w') as f:
+                f.write("="*80 + "\n")
+                f.write("TRAINING EVALUATIONS LOG\n")
+                f.write("="*80 + "\n\n")
+            
+        def _on_step(self):
+            if self.n_calls % self.eval_freq == 0:
+                # Run evaluation with action tracking
+                _, metrics = evaluate_model(self.model, self.eval_env, deterministic=True)
+                mean_reward = metrics['total_return_pct']
+                
+                # Format output
+                output = f"\n{'='*60}\n"
+                output += f"EVAL at {self.num_timesteps:,} steps:\n"
+                output += f"  Return: {mean_reward:+.2f}%\n"
+                output += f"  Trades: {metrics['num_trades']}\n"
+                output += f"  Win Rate: {metrics['win_rate']:.1f}%\n"
+                
+                action_dist = metrics.get('action_distribution', {})
+                if action_dist:
+                    output += f"  Actions:\n"
+                    output += f"    HOLD : {action_dist['HOLD']:5.1f}%\n"
+                    output += f"    CLOSE: {action_dist['CLOSE']:5.1f}%\n"
+                    output += f"    LONG : {action_dist['LONG']:5.1f}%\n"
+                    output += f"    SHORT: {action_dist['SHORT']:5.1f}%\n"
+                
+                # Check if best model
+                if mean_reward > self.best_mean_reward:
+                    self.best_mean_reward = mean_reward
+                    self.evaluations_since_best = 0
+                    self.model.save(os.path.join(self.best_model_save_path, "best_model"))
+                    output += f"  ✓ New best model saved!\n"
+                else:
+                    self.evaluations_since_best += 1
+                    output += f"  ({self.evaluations_since_best} evals since best)\n"
+                
+                output += f"{'='*60}\n"
+                
+                # Print to console
+                print(output)
+                
+                # Append to log file
+                with open(self.eval_log_file, 'a') as f:
+                    f.write(output)
+                
+                # Check early stopping
+                if self.stop_callback is not None:
+                    if self.evaluations_since_best >= self.stop_callback.max_no_improvement_evals:
+                        if self.n_calls // self.eval_freq >= self.stop_callback.min_evals:
+                            stop_msg = f"\n⚠ Early stopping triggered after {self.evaluations_since_best} evals without improvement\n"
+                            print(stop_msg)
+                            with open(self.eval_log_file, 'a') as f:
+                                f.write(stop_msg)
+                            return False
+            
+            return True
+    
+    eval_callback = CustomEvalCallback(
+        eval_env=val_eval_env,
         eval_freq=25_000,
-        n_eval_episodes=1,
         best_model_save_path="./best_model/",
         log_path="./logs/",
-        deterministic=True,
+        stop_callback=stop_callback,
         verbose=1
     )
 
