@@ -466,8 +466,10 @@ class ForexTradingEnv(gym.Env):
                     close_price = float(self.df.loc[self.current_step, "Close"])
                     net_pips = self._close_position("FLIP_CLOSE", close_price)
                     
-                    # Simple PnL reward (no log scaling, no trading cost penalty)
+                    # Reward net PnL
                     reward += net_pips / 100.0
+                    # Trading cost penalty
+                    reward -= 0.05
                     
                     # Trend-following check for flip
                     ema_21_slope = float(self.df.loc[self.current_step, "ema_21_slope_norm"])
@@ -487,19 +489,33 @@ class ForexTradingEnv(gym.Env):
                     self._open_position(direction=direction)
 
         # 2) Advance time FIRST
+        prev_equity = self.equity_usd
         self.current_step += 1
 
         # 3) THEN check SL/TP on the new current bar (no future data!)
         realized_now = self._check_sl_tp_intrabar_and_maybe_close()
         if realized_now is not None:
-            # SIMPLIFIED: Just reward net PnL (no log scaling, no penalties)
+            # Reward net PnL
             reward += realized_now / 100.0
+            # Trading cost penalty (discourages overtrading)
+            reward -= 0.05
 
-        # 4) If still open, update unrealized tracking (for observations only, NO reward penalty)
+        # Drawdown penalty (continuous)
+        equity_delta = self.equity_usd - prev_equity
+        if equity_delta < 0:
+            # Punish equity drops
+            reward -= 0.01 * abs(equity_delta) / 10.0
+
+        # 4) If still open, apply holding penalty
         if self.position != 0:
             self.time_in_trade += 1
             
-            # Update unrealized tracking (for info only, not reward)
+            # Holding penalty (discourages holding too long)
+            current_atr = float(self.df.loc[self.current_step, "atr_14"])
+            risk_exposure = current_atr * self.time_in_trade / self.pip_value
+            reward -= 0.001 * risk_exposure / 10.0
+            
+            # Update unrealized tracking (for observations)
             unreal_now = self._compute_unrealized_pips()
             if unreal_now > self.max_unrealized_pips:
                 self.max_unrealized_pips = unreal_now
