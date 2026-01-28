@@ -444,6 +444,30 @@ class ForexTradingEnv(gym.Env):
 
         elif act_type in ["LONG", "SHORT"]:
             if self.position == 0:
+                # Entry Quality Check 1: Punish counter-trend entries (buying high, selling low)
+                rsi_norm = float(self.df.loc[self.current_step, "rsi_14_norm"])
+                
+                if direction == 1 and rsi_norm > 0.4:  # LONG when RSI > 70 (overbought)
+                    reward -= 0.10  # Strong penalty for buying high
+                elif direction == -1 and rsi_norm < -0.4:  # SHORT when RSI < 30 (oversold)
+                    reward -= 0.10  # Strong penalty for selling low
+                
+                # Entry Quality Check 2: Reward trend-following entries
+                ema_21_slope = float(self.df.loc[self.current_step, "ema_21_slope_norm"])
+                ema_50_200_spread = float(self.df.loc[self.current_step, "ema_50_200_spread_norm"])
+                
+                # Check if entering WITH the trend
+                if direction == 1:  # LONG entry
+                    if ema_21_slope > 0.1 and ema_50_200_spread > 0.1:  # Strong uptrend
+                        reward += 0.05  # Bonus for trading with trend
+                    elif ema_21_slope < -0.1 or ema_50_200_spread < -0.1:  # Counter-trend
+                        reward -= 0.08  # Penalty for trading against trend
+                elif direction == -1:  # SHORT entry
+                    if ema_21_slope < -0.1 and ema_50_200_spread < -0.1:  # Strong downtrend
+                        reward += 0.05  # Bonus for trading with trend
+                    elif ema_21_slope > 0.1 or ema_50_200_spread > 0.1:  # Counter-trend
+                        reward -= 0.08  # Penalty for trading against trend
+                
                 self._open_position(direction=direction)
             else:
                 if self.allow_flip:
@@ -456,6 +480,28 @@ class ForexTradingEnv(gym.Env):
                     else:
                         reward -= 0.075 * abs(np.log(1 + abs(net_pips)))
                     reward -= 0.05
+                    
+                    # Entry Quality Check 1: RSI for flip
+                    rsi_norm = float(self.df.loc[self.current_step, "rsi_14_norm"])
+                    if direction == 1 and rsi_norm > 0.4:
+                        reward -= 0.10
+                    elif direction == -1 and rsi_norm < -0.4:
+                        reward -= 0.10
+                    
+                    # Entry Quality Check 2: Trend-following for flip
+                    ema_21_slope = float(self.df.loc[self.current_step, "ema_21_slope_norm"])
+                    ema_50_200_spread = float(self.df.loc[self.current_step, "ema_50_200_spread_norm"])
+                    
+                    if direction == 1:
+                        if ema_21_slope > 0.1 and ema_50_200_spread > 0.1:
+                            reward += 0.05
+                        elif ema_21_slope < -0.1 or ema_50_200_spread < -0.1:
+                            reward -= 0.08
+                    elif direction == -1:
+                        if ema_21_slope < -0.1 and ema_50_200_spread < -0.1:
+                            reward += 0.05
+                        elif ema_21_slope > 0.1 or ema_50_200_spread > 0.1:
+                            reward -= 0.08
                     
                     self._open_position(direction=direction)
 
