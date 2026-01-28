@@ -444,29 +444,21 @@ class ForexTradingEnv(gym.Env):
 
         elif act_type in ["LONG", "SHORT"]:
             if self.position == 0:
-                # Entry Quality Check 1: Punish counter-trend entries (buying high, selling low)
-                rsi_norm = float(self.df.loc[self.current_step, "rsi_14_norm"])
-                
-                if direction == 1 and rsi_norm > 0.4:  # LONG when RSI > 70 (overbought)
-                    reward -= 0.10  # Strong penalty for buying high
-                elif direction == -1 and rsi_norm < -0.4:  # SHORT when RSI < 30 (oversold)
-                    reward -= 0.10  # Strong penalty for selling low
-                
-                # Entry Quality Check 2: Reward trend-following entries
+                # SIMPLIFIED REWARD: Only trend-following bonus/penalty at entry
                 ema_21_slope = float(self.df.loc[self.current_step, "ema_21_slope_norm"])
                 ema_50_200_spread = float(self.df.loc[self.current_step, "ema_50_200_spread_norm"])
                 
-                # Check if entering WITH the trend
+                # Reward trading WITH the trend, penalize trading AGAINST it
                 if direction == 1:  # LONG entry
                     if ema_21_slope > 0.1 and ema_50_200_spread > 0.1:  # Strong uptrend
-                        reward += 0.05  # Bonus for trading with trend
+                        reward += 0.05  # Bonus for trend-following
                     elif ema_21_slope < -0.1 or ema_50_200_spread < -0.1:  # Counter-trend
-                        reward -= 0.08  # Penalty for trading against trend
+                        reward -= 0.08  # Penalty for counter-trend
                 elif direction == -1:  # SHORT entry
                     if ema_21_slope < -0.1 and ema_50_200_spread < -0.1:  # Strong downtrend
-                        reward += 0.05  # Bonus for trading with trend
+                        reward += 0.05  # Bonus for trend-following
                     elif ema_21_slope > 0.1 or ema_50_200_spread > 0.1:  # Counter-trend
-                        reward -= 0.08  # Penalty for trading against trend
+                        reward -= 0.08  # Penalty for counter-trend
                 
                 self._open_position(direction=direction)
             else:
@@ -474,21 +466,10 @@ class ForexTradingEnv(gym.Env):
                     close_price = float(self.df.loc[self.current_step, "Close"])
                     net_pips = self._close_position("FLIP_CLOSE", close_price)
                     
-                    # Apply profit/loss rewards
-                    if net_pips > 0:
-                        reward += 0.05 * np.log(1 + net_pips)
-                    else:
-                        reward -= 0.075 * abs(np.log(1 + abs(net_pips)))
-                    reward -= 0.05
+                    # Simple PnL reward (no log scaling, no trading cost penalty)
+                    reward += net_pips / 100.0
                     
-                    # Entry Quality Check 1: RSI for flip
-                    rsi_norm = float(self.df.loc[self.current_step, "rsi_14_norm"])
-                    if direction == 1 and rsi_norm > 0.4:
-                        reward -= 0.10
-                    elif direction == -1 and rsi_norm < -0.4:
-                        reward -= 0.10
-                    
-                    # Entry Quality Check 2: Trend-following for flip
+                    # Trend-following check for flip
                     ema_21_slope = float(self.df.loc[self.current_step, "ema_21_slope_norm"])
                     ema_50_200_spread = float(self.df.loc[self.current_step, "ema_50_200_spread_norm"])
                     
@@ -506,35 +487,18 @@ class ForexTradingEnv(gym.Env):
                     self._open_position(direction=direction)
 
         # 2) Advance time FIRST
-        prev_equity = self.equity_usd
         self.current_step += 1
 
         # 3) THEN check SL/TP on the new current bar (no future data!)
         realized_now = self._check_sl_tp_intrabar_and_maybe_close()
         if realized_now is not None:
-            # Apply profit/loss rewards
-            if realized_now > 0:
-                reward += 0.05 * np.log(1 + realized_now)
-            else:
-                reward -= 0.075 * abs(np.log(1 + abs(realized_now)))
-            reward -= 0.05
+            # SIMPLIFIED: Just reward net PnL (no log scaling, no penalties)
+            reward += realized_now / 100.0
 
-        # Component 2b: Continuous drawdown penalty
-        equity_delta = self.equity_usd - prev_equity
-        if equity_delta < 0:
-            # Punish equity drops continuously (scaled for typical drawdowns)
-            reward -= 0.01 * abs(equity_delta) / 10.0  # ~-0.23 for -230 USD drop
-
-        # 4) If still open, apply risk/exposure penalty
+        # 4) If still open, update unrealized tracking (for observations only, NO reward penalty)
         if self.position != 0:
             self.time_in_trade += 1
             
-            # Component 4: Risk/exposure penalty (not time penalty)
-            # Penalty based on risk taken (ATR × bars held)
-            current_atr = float(self.df.loc[self.current_step, "atr_14"])
-            risk_exposure = current_atr * self.time_in_trade / self.pip_value
-            reward -= 0.001 * risk_exposure / 10.0  # ~-0.003 for typical hold
-
             # Update unrealized tracking (for info only, not reward)
             unreal_now = self._compute_unrealized_pips()
             if unreal_now > self.max_unrealized_pips:
